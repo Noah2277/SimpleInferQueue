@@ -13,6 +13,7 @@ add_executable(test_lockfree examples/test_lockfree.cpp)
 add_executable(mock_inference examples/mock_inference.cpp)
 add_executable(bench_blocking examples/bench_blocking.cpp)
 add_executable(bench_lockfree examples/bench_lockfree.cpp)
+add_executable(test_ms_queue examples/test_ms_queue.cpp)
 
 #链接线程库
 find_package(Threads REQUIRED)
@@ -22,3 +23,4 @@ target_link_libraries(test_lockfree Threads::Threads)
 target_link_libraries(mock_inference Threads::Threads)
 target_link_libraries(bench_blocking Threads::Threads)
 target_link_libraries(bench_lockfree Threads::Threads)
+target_link_libraries(test_ms_queue Threads::Threads)
