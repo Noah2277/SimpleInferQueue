@@ -1,13 +1,16 @@
 # SimpleInferQueue
 
-一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务的完整演示。仅依赖 C++17 标准库，无第三方依赖。
+![CI](https://github.com/Noah2277/SimpleInferQueue/actions/workflows/ci.yml/badge.svg)
+
+一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务的完整演示。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
 
 ## 项目特性
 
 - **两种并发模型**：互斥锁 + 条件变量，与 CAS 无锁队列，适配不同场景
 - **Michael-Scott 无锁队列**：MPMC（多生产者-多消费者），链表 + 哑节点设计
-- **完整测试**：单元测试、多线程并发正确性测试、性能基准测试
+- **完整测试**：GoogleTest 单元测试、多线程并发正确性测试、性能基准测试，CI 三平台（Linux / Windows / macOS）自动验证
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
+- **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 
 ## 项目结构
 
@@ -20,12 +23,18 @@ SimpleInferQueue/
 │   └── ms_queue.h             # Michael-Scott 无锁队列（MPMC，链表+哑节点）
 ├── examples/
 │   ├── demo_producer_consumer.cpp  # 阻塞队列多线程演示
-│   ├── test_try.cpp                # 非阻塞接口单元测试
-│   ├── test_lockfree.cpp           # 无锁队列并发正确性测试
-│   ├── test_ms_queue.cpp           # MS队列多线程正确性测试（4生产者×4消费者）
 │   ├── bench_blocking.cpp          # 互斥锁队列性能基准测试
 │   ├── bench_lockfree.cpp          # 无锁队列性能基准测试
 │   └── mock_inference.cpp          # 模拟AI推理服务集成演示
+├── tests/
+│   ├── test_ring_buffer.cpp        # 环形缓冲区单元测试（FIFO/边界/回绕）
+│   ├── test_block_queue.cpp        # 阻塞队列测试（try 接口 + 多线程）
+│   ├── test_lockfree_queue.cpp     # 无锁队列测试（容量边界 + SPSC）
+│   └── test_ms_queue.cpp           # MS队列测试（FIFO + 4P×4C 不重不漏）
+├── cmake/
+│   └── SimpleInferQueueConfig.cmake.in  # 包配置模板（供 find_package 使用）
+├── .github/workflows/ci.yml        # 三平台 CI + clang-format 检查
+├── .clang-format
 └── CMakeLists.txt
 ```
 
@@ -48,43 +57,74 @@ SimpleInferQueue/
 
 ### 前置要求
 
-- CMake ≥ 3.10
+- CMake ≥ 3.16
 - 支持 C++17 的编译器（MSVC / GCC / Clang）
+- 首次构建会通过 FetchContent 从 GitHub 下载 GoogleTest 源码（仅测试需要，可用 `-DSIMPLEINFERQUEUE_BUILD_TESTS=OFF` 关闭）
 
-### Windows (Visual Studio)
-
-```powershell
-cd SimpleInferQueue
-cmake -S . -B build
-cmake --build build --config Debug
-```
-
-### Linux / macOS
+### 构建
 
 ```bash
-cd SimpleInferQueue
-cmake -S . -B build
-cmake --build build
+# 在仓库根目录执行（Linux / macOS / Windows PowerShell 通用）
+cmake -S SimpleInferQueue -B build
+cmake --build build --config Release
 ```
 
-## 运行测试
+> **Windows 注意**：项目/构建路径若含非 ASCII 字符（如中文），gtest 的测试发现（`gtest_discover_tests`）会因 MSVC CRT 与 CMake 的编码不一致而失败。请把构建目录放到纯 ASCII 路径：
+>
+> ```powershell
+> cmake -S SimpleInferQueue -B D:\build\SimpleInferQueue
+> cmake --build D:\build\SimpleInferQueue --config Release
+> ctest --test-dir D:\build\SimpleInferQueue -C Release --output-on-failure
+> ```
 
-### Windows (PowerShell)
+> **离线/网络不稳时**：GoogleTest 首次下载失败，可预先下载源码后通过 FetchContent 本地源覆盖，跳过网络下载：
+>
+> ```powershell
+> cmake -S SimpleInferQueue -B D:\build\SimpleInferQueue `
+>       -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=D:\deps\googletest-1.16.0
+> ```
 
-```powershell
-.\build\Debug\test_try.exe        # 非阻塞接口单元测试
-.\build\Debug\test_lockfree.exe   # 无锁队列并发正确性测试
-.\build\Debug\test_ms_queue.exe   # MS队列多线程正确性测试（输出 PASS/FAIL）
-.\build\Debug\mock_inference.exe  # 模拟AI推理服务演示
-```
-
-### Linux / macOS
+### 运行测试
 
 ```bash
-./build/test_try
-./build/test_lockfree
-./build/test_ms_queue
-./build/mock_inference
+ctest --test-dir build -C Release --output-on-failure
+```
+
+构建出的示例程序（`build/Release/` 或 `build/` 下）：
+
+```bash
+./demo_pc          # 阻塞队列多线程演示
+./mock_inference   # 模拟AI推理服务演示
+./bench_blocking   # 互斥锁队列性能基准
+./bench_lockfree   # 无锁队列性能基准
+```
+
+## 安装与下游使用
+
+```bash
+# 安装到指定前缀
+cmake --install build --prefix /path/to/install
+```
+
+下游 CMake 工程：
+
+```cmake
+find_package(SimpleInferQueue CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE SimpleInferQueue::SimpleInferQueue)
+```
+
+头文件直接 `#include "ms_queue.h"` 等即可使用。
+
+## 代码格式
+
+项目使用 clang-format（基于 LLVM 风格，4 空格缩进），配置见仓库根目录 `.clang-format`。CI 会检查格式，违规会导致构建失败：
+
+```bash
+# 格式化全部源码（版本需与 CI 一致：18.1.8）
+clang-format -i SimpleInferQueue/include/*.h SimpleInferQueue/examples/*.cpp SimpleInferQueue/tests/*.cpp
+
+# 本地检查是否合规
+clang-format --dry-run --Werror <file>
 ```
 
 ## 性能对比

@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+# 导出目标依赖 Threads::Threads，下游 configure 时需要重新找到
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/SimpleInferQueueTargets.cmake")
+
+check_required_components(SimpleInferQueue)

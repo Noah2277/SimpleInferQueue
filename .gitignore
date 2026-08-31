@@ -1,2 +1,5 @@
 # 忽略压缩包快照（GitHub 网页上传的 zip 等）
 *.zip
+
+# 构建输出（本地与 CI 均在仓库根目录下建 build）
+build/

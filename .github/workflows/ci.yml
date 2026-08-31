@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # --config/-C 在单配置生成器下被忽略，在多配置生成器（MSVC）下生效，
+        # 因此同一套命令兼容三平台
+        run: cmake -S SimpleInferQueue -B build
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        # 固定版本，与本地开发环境保持一致
+        run: pip install clang-format==18.1.8
+
+      - name: Check formatting
+        run: |
+          find SimpleInferQueue \( -name '*.h' -o -name '*.cpp' \) -print \
+            | xargs clang-format --dry-run --Werror
