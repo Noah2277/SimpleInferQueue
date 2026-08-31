@@ -1,21 +1,21 @@
-#include <thread>
+#include "block_queue.h"
 #include <chrono>
 #include <iostream>
-#include "block_queue.h"
+#include <thread>
 
-int main(){
+int main() {
     BlockQueue<int> queue(5);
 
-    std::thread producer([&queue](){
-        for(int i = 0; i < 20; i++){
+    std::thread producer([&queue]() {
+        for (int i = 0; i < 20; i++) {
             queue.Push(i);
             std::cout << "生产了：" << i << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
 
-    std::thread consumer([&queue](){
-        for(int i = 0; i < 20; i++){
+    std::thread consumer([&queue]() {
+        for (int i = 0; i < 20; i++) {
             int value = queue.Pop();
             std::cout << "消费了：" << value << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
