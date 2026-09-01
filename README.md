@@ -8,7 +8,7 @@
 
 - **两种并发模型**：互斥锁 + 条件变量，与 CAS 无锁队列，适配不同场景
 - **Michael-Scott 无锁队列**：MPMC（多生产者-多消费者），链表 + 哑节点设计
-- **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准，CI 三平台（Linux / Windows / macOS）自动验证
+- **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 自动验证
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 - **开源协议**：MIT License，可自由使用、修改与分发
@@ -43,27 +43,27 @@ q.Dequeue(v);  // v == 42
 ```
 SimpleInferQueue/
 ├── include/
-│   ├── ring_buffer.h          # 环形缓冲区（非线程安全）
-│   ├── block_queue.h          # 互斥锁阻塞队列
-│   ├── lockfree_queue.h       # CAS无锁队列（原子操作+内存序）
-│   └── ms_queue.h             # Michael-Scott 无锁队列（MPMC，链表+哑节点）
+│   ├── ring_buffer.h                    # 环形缓冲区（非线程安全）
+│   ├── block_queue.h                    # 互斥锁阻塞队列
+│   ├── lockfree_queue.h                 # CAS无锁队列（原子操作+内存序）
+│   └── ms_queue.h                       # Michael-Scott 无锁队列（MPMC，链表+哑节点）
 ├── benchmarks/
-│   ├── bench_block_queue.cpp       # BlockQueue SPSC 吞吐基准（Google Benchmark）
-│   ├── bench_lockfree_queue.cpp    # LockFreeQueue SPSC 吞吐基准
-│   └── bench_ms_queue.cpp          # MSQueue 4P×4C MPMC 吞吐基准
+│   ├── bench_block_queue.cpp            # BlockQueue SPSC 吞吐基准（Google Benchmark）
+│   ├── bench_lockfree_queue.cpp         # LockFreeQueue SPSC 吞吐基准
+│   └── bench_ms_queue.cpp               # MSQueue 4P×4C MPMC 吞吐基准
 ├── examples/
-│   ├── demo_producer_consumer.cpp  # 阻塞队列多线程演示
-│   └── mock_inference.cpp          # 模拟AI推理服务集成演示
+│   ├── demo_producer_consumer.cpp       # 阻塞队列多线程演示
+│   └── mock_inference.cpp               # 模拟AI推理服务集成演示
 ├── tests/
-│   ├── test_ring_buffer.cpp        # 环形缓冲区单元测试（FIFO/边界/回绕）
-│   ├── test_block_queue.cpp        # 阻塞队列测试（try 接口 + 多线程）
-│   ├── test_lockfree_queue.cpp     # 无锁队列测试（容量边界 + SPSC）
-│   └── test_ms_queue.cpp           # MS队列测试（FIFO + 4P×4C 不重不漏）
+│   ├── test_ring_buffer.cpp             # 环形缓冲区单元测试（FIFO/边界/回绕）
+│   ├── test_block_queue.cpp             # 阻塞队列测试（try 接口 + 多线程）
+│   ├── test_lockfree_queue.cpp          # 无锁队列测试（容量边界 + SPSC）
+│   └── test_ms_queue.cpp                # MS队列测试（FIFO + 4P×4C 不重不漏）
 ├── cmake/
 │   └── SimpleInferQueueConfig.cmake.in  # 包配置模板（供 find_package 使用）
-├── .github/workflows/ci.yml        # 三平台 CI + clang-format 检查
+├── .github/workflows/ci.yml             # 三平台 CI + TSAN 数据竞争检测 + clang-format 检查
 ├── .clang-format
-├── LICENSE                         # MIT License
+├── LICENSE                              # MIT License
 └── CMakeLists.txt
 ```
 
@@ -149,7 +149,7 @@ target_link_libraries(my_app PRIVATE SimpleInferQueue::SimpleInferQueue)
 
 ```bash
 # 格式化全部源码（版本需与 CI 一致：18.1.8）
-clang-format -i SimpleInferQueue/include/*.h SimpleInferQueue/examples/*.cpp SimpleInferQueue/tests/*.cpp
+clang-format -i SimpleInferQueue/include/*.h SimpleInferQueue/examples/*.cpp SimpleInferQueue/tests/*.cpp SimpleInferQueue/benchmarks/*.cpp
 
 # 本地检查是否合规
 clang-format --dry-run --Werror <file>
@@ -192,3 +192,6 @@ Processing request ID: 7323, Path: image/7323.jpg
 ## 关于本项目
 
 本项目是作者从零开始学习并发编程、无锁编程与工程构建的实践成果：从有锁到无锁，从基础组件到完整服务，每一步都经过测试验证。
+
+## 知乎账号
+https://www.zhihu.com/people/94-16-90-75
