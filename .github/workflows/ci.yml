@@ -29,6 +29,26 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # 数据竞争检测：ThreadSanitizer 内置完整的 C++ 内存模型（happens-before 分析），
+  # 能抓出功能测试发现不了的 atomics 误用与内存序错误。仅 Linux 可用（MSVC 无 TSAN），
+  # 且是动态检测——只能覆盖测试实际跑到的执行路径
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with TSAN
+        run: >
+          cmake -S SimpleInferQueue -B build-tsan
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+          -DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build-tsan
+
+      - name: Test under ThreadSanitizer
+        run: ctest --test-dir build-tsan --output-on-failure
+
   clang-format:
     runs-on: ubuntu-latest
     steps:
