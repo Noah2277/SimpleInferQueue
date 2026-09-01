@@ -1,12 +1,16 @@
 #include "block_queue.h"
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include <atomic>
 #include <chrono>
 #include <iostream>
 #include <thread>
 
 int main() {
-    SetConsoleOutputCP(CP_UTF8);
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8); // Windows 控制台默认 GBK，切到 UTF-8 才能正常显示中文
+#endif
     constexpr int N = 1000000;
     BlockQueue<int> q(4096);
 

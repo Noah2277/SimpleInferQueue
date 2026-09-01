@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    paths-ignore:
+      # 纯文档/笔记改动不触发 CI（README、学习笔记等）
+      - '**.md'
+      - 'learn/**'
   pull_request:
 
 jobs:
