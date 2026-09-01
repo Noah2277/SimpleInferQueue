@@ -4,6 +4,8 @@
 #include <condition_variable>
 #include <mutex>
 
+// 线程模型：多生产者-多消费者（MPMC）安全。
+// Push/Pop 在队列满/空时阻塞等待；try_Push/try_Pop 非阻塞，立即返回成败。
 template <typename T> class BlockQueue {
   public:
     BlockQueue(size_t max_size = 100) : buffer_(max_size) {}

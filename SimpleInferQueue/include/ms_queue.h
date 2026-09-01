@@ -2,6 +2,8 @@
 
 #include <atomic>
 
+// 线程模型：多生产者-多消费者（MPMC）安全，无界队列（可无限入队）。
+// 注意：被出队的节点暂不回收内存（规避无锁内存回收难题），仅析构时回收仍在队列中的节点。
 template <typename T> class MSQueue {
   public:
     MSQueue() {

@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 
+// 线程模型：非线程安全，仅限单线程使用。
+// 多线程场景请使用 BlockQueue（有锁）或 LockFreeQueue / MSQueue（无锁）。
 template <typename T> class RingBuffer {
   public:
     // 构造函数：传入容量
