@@ -23,10 +23,8 @@ target_link_libraries(SimpleInferQueue INTERFACE Threads::Threads)
 # ============ 示例程序 ============
 add_executable(demo_pc examples/demo_producer_consumer.cpp)
 add_executable(mock_inference examples/mock_inference.cpp)
-add_executable(bench_blocking examples/bench_blocking.cpp)
-add_executable(bench_lockfree examples/bench_lockfree.cpp)
 
-foreach(target demo_pc mock_inference bench_blocking bench_lockfree)
+foreach(target demo_pc mock_inference)
     target_link_libraries(${target} PRIVATE SimpleInferQueue::SimpleInferQueue)
 endforeach()
 
@@ -64,6 +62,33 @@ if(SIMPLEINFERQUEUE_BUILD_TESTS)
         SimpleInferQueue::SimpleInferQueue
         GTest::gtest_main)
     gtest_discover_tests(siq_tests)
+endif()
+
+# ============ 基准测试（Google Benchmark） ============
+# 与测试相同的顶层检测逻辑：作为库被下游引入时不构建基准
+option(SIMPLEINFERQUEUE_BUILD_BENCHMARKS "Build SimpleInferQueue benchmarks"
+       ${SIMPLEINFERQUEUE_BUILD_TESTS_DEFAULT})
+
+if(SIMPLEINFERQUEUE_BUILD_BENCHMARKS)
+    include(FetchContent)
+    FetchContent_Declare(
+        googlebenchmark
+        URL https://github.com/google/benchmark/archive/refs/tags/v1.9.5.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    # 不编译 benchmark 自带的测试（省构建时间），也不随库安装到下游 prefix
+    # （与 INSTALL_GTEST OFF 同理）
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googlebenchmark)
+
+    add_executable(siq_benchmarks
+        benchmarks/bench_block_queue.cpp
+        benchmarks/bench_lockfree_queue.cpp
+        benchmarks/bench_ms_queue.cpp)
+    target_link_libraries(siq_benchmarks PRIVATE
+        SimpleInferQueue::SimpleInferQueue
+        benchmark::benchmark)
 endif()
 
 # ============ 安装与包导出 ============

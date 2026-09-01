@@ -39,6 +39,9 @@ jobs:
         run: pip install clang-format==18.1.8
 
       - name: Check formatting
+        # 只扫描明确的源码目录，避免误扫到任何构建目录里的生成文件
         run: |
-          find SimpleInferQueue \( -name '*.h' -o -name '*.cpp' \) -print \
+          find SimpleInferQueue/include SimpleInferQueue/examples \
+               SimpleInferQueue/tests SimpleInferQueue/benchmarks \
+               \( -name '*.h' -o -name '*.cpp' \) -print \
             | xargs clang-format --dry-run --Werror
