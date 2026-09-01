@@ -11,6 +11,32 @@
 - **完整测试**：GoogleTest 单元测试、多线程并发正确性测试、性能基准测试，CI 三平台（Linux / Windows / macOS）自动验证
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
+- **开源协议**：MIT License，可自由使用、修改与分发
+
+## 快速上手
+
+```cpp
+#include "ms_queue.h"
+
+MSQueue<int> q;
+q.Enqueue(42);
+
+int v = 0;
+q.Dequeue(v);  // v == 42
+```
+
+完整构建/安装方法见下文「构建与运行」「安装与下游使用」。
+
+## 组件与适用场景
+
+线程模型是各组件最关键的契约，**使用前务必确认**：
+
+| 组件 | 线程模型 | 生产者 | 消费者 | 阻塞 | 容量 | 说明 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `RingBuffer` | 非线程安全 | - | - | 否 | 固定 | 基础环形缓冲区，多线程下需自行加锁 |
+| `BlockQueue` | 互斥锁 + 条件变量 | 多 | 多 | `Push`/`Pop` 阻塞，`try_*` 非阻塞 | 固定 | 通用阻塞队列，适合生产者-消费者 |
+| `LockFreeQueue` | CAS 无锁 | **单** | **单** | 否 | 固定 | **仅 SPSC 安全**，多生产者/多消费者请用 `MSQueue` |
+| `MSQueue` | Michael-Scott 无锁 | 多 | 多 | 否 | 无界 | MPMC；出队节点暂不释放内存（见下文设计要点） |
 
 ## 项目结构
 
@@ -35,6 +61,7 @@ SimpleInferQueue/
 │   └── SimpleInferQueueConfig.cmake.in  # 包配置模板（供 find_package 使用）
 ├── .github/workflows/ci.yml        # 三平台 CI + clang-format 检查
 ├── .clang-format
+├── LICENSE                         # MIT License
 └── CMakeLists.txt
 ```
 

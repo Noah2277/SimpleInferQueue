@@ -3,6 +3,8 @@
 #include <atomic>
 #include <vector>
 
+// 线程模型：仅单生产者-单消费者（SPSC）安全。
+// 多生产者/多消费者场景请使用 MSQueue（见 ms_queue.h）。
 template <typename T> class LockFreeQueue {
   public:
     explicit LockFreeQueue(size_t capacity)
