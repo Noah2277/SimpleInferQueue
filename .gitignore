@@ -1,5 +1,36 @@
-# 忽略压缩包快照（GitHub 网页上传的 zip 等）
+# 压缩包快照（GitHub 网页上传的 zip 等）
 *.zip
 
-# 构建输出（本地与 CI 均在仓库根目录下建 build）
+# 构建输出（覆盖仓库根与子项目的 build 目录）
 build/
+Debug/
+Release/
+x64/
+x86/
+
+# 编译产物
+*.exe
+*.dll
+*.so
+*.dylib
+*.ilk
+*.pdb
+*.obj
+*.o
+*.out
+
+# IDE
+.vs/
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+*.sln
+
+# CMake 生成物
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
