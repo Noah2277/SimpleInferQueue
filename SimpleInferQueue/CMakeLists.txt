@@ -4,9 +4,10 @@ project(SimpleInferQueue VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# /utf-8 是 MSVC 专属选项，GCC/Clang 不认识，必须按编译器区分
+# /utf-8 是 MSVC 专属选项，GCC/Clang 不认识，必须按编译器区分；
+# 并限定 C++ 语言——CUDA 目标会由 nvcc 收到不认识的 /utf-8（见下方 CUDA 示例块）
 if(MSVC)
-    add_compile_options("/utf-8")
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 endif()
 
 # 队列组件需要线程支持
@@ -89,6 +90,59 @@ if(SIMPLEINFERQUEUE_BUILD_BENCHMARKS)
     target_link_libraries(siq_benchmarks PRIVATE
         SimpleInferQueue::SimpleInferQueue
         benchmark::benchmark)
+endif()
+
+# ============ CUDA 示例（可选，需本机装有 CUDA Toolkit） ============
+# CI 与无 GPU 机器上没有 CUDA，不能写进 project(LANGUAGES ...)，
+# 用 check_language 探测：有则启用，没有则跳过
+option(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES "Build CUDA pipeline examples"
+       ${SIMPLEINFERQUEUE_BUILD_TESTS_DEFAULT})
+
+if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+        # 显式声明 CUDA 架构（CMake 4 起 CMP0104 默认 NEW，不允许留空）。
+        # native = 为本机 GPU 直接编译 SASS（无 PTX JIT 开销，也消除 nvcc
+        # 旧架构弃用警告）；无 GPU 的机器可用 -DCMAKE_CUDA_ARCHITECTURES=75 覆盖
+        cmake_policy(SET CMP0104 NEW)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(CMAKE_CUDA_ARCHITECTURES native)
+        endif()
+
+        # MSVC 宿主编译器：nvcc 默认按 GBK(936) 解读中文注释（C4819），
+        # -Xcompiler=/utf-8 把该选项透传给 cl.exe（和手动 nvcc 命令一致）
+        if(MSVC)
+            set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/utf-8")
+        endif()
+
+        # 自动发现 examples/cuda_pipeline/ 下的 .cu，每个文件一个可执行目标：
+        # - file(GLOB CONFIGURE_DEPENDS) 监视「目录列表」——以后新增 .cu 文件时，
+        #   cmake --build 会自动重新配置并加入新目标
+        # - CMAKE_CONFIGURE_DEPENDS 监视「文件内容」——已存在的 .cu 被修改时
+        #   同样触发自动重新配置（glob 只看文件名列表，不监视内容变化）
+        file(GLOB cuda_pipeline_sources CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/examples/cuda_pipeline/*.cu")
+        set_property(DIRECTORY APPEND PROPERTY
+                     CMAKE_CONFIGURE_DEPENDS ${cuda_pipeline_sources})
+        foreach(cuda_source ${cuda_pipeline_sources})
+            # 空壳文件（还没有 main）跳过，写完内容后下一次构建自动加入
+            # （file(SIZE) 必须用绝对路径——configure 阶段相对路径的解析基准不可靠）
+            file(SIZE "${cuda_source}" cuda_example_size)
+            if(cuda_example_size GREATER 0)
+                get_filename_component(cuda_example "${cuda_source}" NAME_WE)
+                add_executable(${cuda_example} ${cuda_source})
+                target_link_libraries(${cuda_example} PRIVATE SimpleInferQueue::SimpleInferQueue)
+                message(STATUS "CUDA example: ${cuda_example}")
+            endif()
+        endforeach()
+    else()
+        message(STATUS "CUDA compiler not found - skipping CUDA examples (CI runners have no GPU)")
+    endif()
 endif()
 
 # ============ 安装与包导出 ============

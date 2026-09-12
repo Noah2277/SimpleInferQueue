@@ -2,13 +2,14 @@
 
 ![CI](https://github.com/Noah2277/SimpleInferQueue/actions/workflows/ci.yml/badge.svg)
 
-一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务的完整演示。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
+一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务演示与 4 个逐步演进的 CUDA GPU 流水线示例。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
 
 ## 项目特性
 
 - **两种并发模型**：互斥锁 + 条件变量，与 CAS 无锁队列，适配不同场景
 - **Michael-Scott 无锁队列**：MPMC（多生产者-多消费者），链表 + 哑节点设计
 - **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 自动验证
+- **GPU 流水线示例**：4 个 CUDA 演进版本（同步基线 → 缓冲池 → 多流 → 双向流水线），附本机实测性能对照
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 - **开源协议**：MIT License，可自由使用、修改与分发
@@ -53,7 +54,12 @@ SimpleInferQueue/
 │   └── bench_ms_queue.cpp               # MSQueue 4P×4C MPMC 吞吐基准
 ├── examples/
 │   ├── demo_producer_consumer.cpp       # 阻塞队列多线程演示
-│   └── mock_inference.cpp               # 模拟AI推理服务集成演示
+│   ├── mock_inference.cpp               # 模拟AI推理服务集成演示
+│   └── cuda_pipeline/                   # CUDA GPU 流水线示例（4 个演进版本，可选构建）
+│       ├── v1_sync_baseline.cu          # v1 同步基线（默认流 + 同步拷贝，无池）
+│       ├── v2_mempool_sync.cu           # v2 显存缓冲池 + 回收线程（单消费者同步）
+│       ├── v3_multistream_pool.cu       # v3 多流全异步 + 缓冲池
+│       └── v4_bidirectional.cu          # v4 双向流水线（生产/消费/输出/回收）
 ├── tests/
 │   ├── test_ring_buffer.cpp             # 环形缓冲区单元测试（FIFO/边界/回绕）
 │   ├── test_block_queue.cpp             # 阻塞队列测试（try 接口 + 多线程）
@@ -88,7 +94,8 @@ SimpleInferQueue/
 
 - CMake ≥ 3.16
 - 支持 C++17 的编译器（MSVC / GCC / Clang）
-- 首次构建会通过 FetchContent 从 GitHub 下载 GoogleTest 与 Google Benchmark 源码（仅测试/基准需要，可分别用 `-DSIMPLEINFERQUEUE_BUILD_TESTS=OFF` / `-DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF` 关闭）
+- CUDA Toolkit（可选，仅构建 `examples/cuda_pipeline/` 的 GPU 流水线示例时需要；未安装时 CMake 自动跳过，不影响其余部分）
+- 首次构建会通过 FetchContent 从 GitHub 下载 GoogleTest 与 Google Benchmark 源码（仅测试/基准需要，可分别用 `-DSIMPLEINFERQUEUE_BUILD_TESTS=OFF` / `-DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF` 关闭；CUDA 示例可用 `-DSIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES=OFF` 关闭）
 
 ### 构建
 
@@ -125,6 +132,9 @@ ctest --test-dir build -C Release --output-on-failure
 ./demo_pc          # 阻塞队列多线程演示
 ./mock_inference   # 模拟AI推理服务演示
 ./siq_benchmarks   # 性能基准（Google Benchmark）
+
+# CUDA 流水线示例（仅在检测到 CUDA Toolkit 时构建，详见下文「CUDA 流水线示例」）
+./v1_sync_baseline  ./v2_mempool_sync  ./v3_multistream_pool  ./v4_bidirectional
 ```
 
 ## 安装与下游使用
@@ -155,6 +165,8 @@ clang-format -i SimpleInferQueue/include/*.h SimpleInferQueue/examples/*.cpp Sim
 clang-format --dry-run --Werror <file>
 ```
 
+> `examples/cuda_pipeline/` 下的 `.cu` 文件不在检查范围内（CUDA 代码排版风格独立），CI 的格式检查同样只扫描 `.h` / `.cpp`。
+
 ## 性能基准
 
 基准使用 [Google Benchmark](https://github.com/google/benchmark)（构建时通过 FetchContent 自动拉取 v1.9.5），全部基准编译为一个可执行文件：
@@ -178,6 +190,46 @@ clang-format --dry-run --Werror <file>
 
 - SPSC 场景：无锁队列吞吐约为有锁队列的 **1.94 倍**
 - MSQueue 单操作开销远高于 SPSC——**8 个线程竞争同一队列时 CAS 反复失败重试，这正是「无锁不等于免费」**：锁的开销换成了缓存行乒乓与 CAS 竞争开销，且出队节点暂不回收、内存持续占用
+
+## CUDA 流水线示例：从同步到双向流水线
+
+`examples/cuda_pipeline/` 下是 4 个逐步演进的 CPU-GPU 流水线版本，展示推理场景中从「能用」到「生产级」的优化路径。构建时 CMake 自动探测 CUDA Toolkit：本机安装则编译，未安装（如 CI 的无 GPU runner）则静默跳过。
+
+测试环境：RTX 5060 Laptop GPU / CUDA 12.8 / Windows MSVC Release / 100 个任务 × 65536 元素向量加法 / 缓冲池 4 块。
+
+| 版本 | 设计 | 总耗时 | 吞吐量 | 相对 v1 |
+| :--- | :--- | :--- | :--- | :--- |
+| v1 同步基线 | 默认流 + 同步拷贝，一次一个任务 | 134.86 ms | 741.5 tasks/s | 1.00× |
+| v2 缓冲池 | 显存池复用 + 回收线程（单消费者，同步拷贝） | 34.27 ms | 2918.3 tasks/s | **3.94×** |
+| v3 多流全异步 | 生产者/消费者专用流 + 全异步拷贝 | 19.02 ms | 5259.0 tasks/s | **7.09×** |
+| v4 双向流水线 | 3 消费者 + 输出线程 + 回收线程，双重背压 | 27.85 ms | 3591.1 tasks/s | **4.84×** |
+
+### 演进分析
+
+- **v1 → v2（3.94×）**：缓冲池复用显存，消除每个任务的 `cudaMalloc`/`cudaFree`；回收线程把「等 GPU 用完块」的同步移出主路径
+- **v2 → v3（1.80×）**：生产者、消费者各自专用流，绕开 legacy 默认流「一条流阻塞所有流」的全局同步；拷贝全异步化，CPU 不再空等 GPU
+- **v3 → v4（吞吐量下降约 32%）**：新增输出线程与逐任务事件同步、有界队列双重背压（池空则生产者阻塞、回收慢则消费者阻塞）——显存占用有上界、结果顺序有保证。**性能不是唯一目标**：v4 用约三成峰值吞吐换来了生产级的资源可控性，这正是推理服务（如 vLLM、TensorRT 流水线）的真实取舍；追求极限吞吐选 v3 形态，追求稳健可控选 v4 形态
+
+### 构建与运行
+
+```bash
+# CMake 自动探测 CUDA，examples/cuda_pipeline/ 下每个 .cu 生成一个可执行目标
+cmake -S SimpleInferQueue -B build
+cmake --build build --config Release --target v4_bidirectional   # 换成其他目标名即可编译对应版本
+```
+
+> **Windows 注意**：与前文「构建」一节相同——项目路径含中文时请改用纯 ASCII 构建目录（如 `D:\build\SimpleInferQueue`），否则 gtest 测试发现会失败。
+
+构建产物（Windows 多配置生成器位于 `Release/` 子目录）：
+
+```bash
+./v1_sync_baseline    # v1 同步基线
+./v2_mempool_sync     # v2 缓冲池
+./v3_multistream_pool # v3 多流全异步
+./v4_bidirectional    # v4 双向流水线
+```
+
+四个版本输出格式一致（PASS + 耗时 + 吞吐），可直接对比。
 
 ## 模拟推理服务器运行效果
 
