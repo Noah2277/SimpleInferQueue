@@ -120,6 +120,27 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
             set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/utf-8")
         endif()
 
+        # ONNX Runtime（可选依赖）：只对真正用到它的示例生效——v1~v4 是纯 CUDA，
+        # 绑上 ORT 会让它们在没装 ORT 的机器（如 CI）上构建失败。
+        # 查找顺序：环境变量 ONNXRUNTIME_ROOT → third_party/onnxruntime → 都没找到
+        # 就跳过依赖 ORT 的示例。默认值刻意不写死成某个绝对路径，否则这份文件
+        # 换个机器就带着别人的 D 盘路径。
+        # 本机路径写在 CMakeUserPresets.json（不入库），或用 -DONNXRUNTIME_ROOT= 覆盖。
+        # 注意 ONNXRUNTIME_ROOT 是 CACHE 变量：一旦进了 CMakeCache.txt，改这里的默认值
+        # 不会生效，必须显式 -D 覆盖或删掉缓存重配
+        if(DEFINED ENV{ONNXRUNTIME_ROOT})
+            set(_ort_default "$ENV{ONNXRUNTIME_ROOT}")
+        else()
+            set(_ort_default "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+        endif()
+        set(ONNXRUNTIME_ROOT "${_ort_default}" CACHE PATH "ONNX Runtime 解压根目录")
+        if(EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime_cxx_api.h")
+            set(ONNXRUNTIME_AVAILABLE ON)
+        else()
+            set(ONNXRUNTIME_AVAILABLE OFF)
+            message(STATUS "ONNX Runtime not found at ${ONNXRUNTIME_ROOT} - onnx examples will be skipped")
+        endif()
+
         # 自动发现 examples/cuda_pipeline/ 下的 .cu，每个文件一个可执行目标：
         # - file(GLOB CONFIGURE_DEPENDS) 监视「目录列表」——以后新增 .cu 文件时，
         #   cmake --build 会自动重新配置并加入新目标
@@ -135,9 +156,52 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
             file(SIZE "${cuda_source}" cuda_example_size)
             if(cuda_example_size GREATER 0)
                 get_filename_component(cuda_example "${cuda_source}" NAME_WE)
+
+                # 按「源码内容」而非「文件名含 onnx」判断是否需要 ORT：
+                # 文件改名/新增同类示例时不会漏配
+                file(READ "${cuda_source}" cuda_example_content)
+                string(FIND "${cuda_example_content}" "onnxruntime" cuda_ort_pos)
+
+                if(cuda_ort_pos GREATER -1 AND NOT ONNXRUNTIME_AVAILABLE)
+                    message(STATUS "CUDA example skipped (needs ONNX Runtime): ${cuda_example}")
+                    continue()
+                endif()
+
                 add_executable(${cuda_example} ${cuda_source})
                 target_link_libraries(${cuda_example} PRIVATE SimpleInferQueue::SimpleInferQueue)
-                message(STATUS "CUDA example: ${cuda_example}")
+
+                if(cuda_ort_pos GREATER -1)
+                    target_include_directories(${cuda_example} PRIVATE "${ONNXRUNTIME_ROOT}/include")
+                    target_link_libraries(${cuda_example} PRIVATE "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib")
+                    # 模型路径以绝对路径注入：exe 在 build/Debug/ 下，源码里写
+                    # "models/xxx.onnx" 这种相对路径会按「当前工作目录」解析，
+                    # 从 build 目录运行就找不到模型，只有 cwd 恰好是仓库根才对。
+                    # 内层引号必须转义：不转义的话 CMake 解析参数时会把这层引号
+                    # 吃掉，宏展开后变成裸标记 D:/... 而不是字符串字面量，编译报错
+                    #
+                    # 注入 mobilenet_batch64.onnx（models/export_mobilenet_batch64.py 的产物），
+                    # 不是 model.onnx / mobilenet.onnx——示例里 BATCH/IN_C/IN_H/IN_W/OUT_SIZE
+                    # 是按 64x3x224x224 -> 64x1000 写死的，喂错模型会在 session.Run()
+                    # 抛形状不匹配异常，而线程里没人接，直接 terminate 掉整个进程
+                    # （且 stdout 是块缓冲，什么日志都看不到）
+                    target_compile_definitions(${cuda_example} PRIVATE
+                        "MODEL_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/models/mobilenet_batch64.onnx\"")
+                    # ORT 的 DLL 必须与 exe 同目录：本机 System32 里残留着旧版
+                    # onnxruntime.dll(1.17)，而 Windows 搜索顺序里 System32 优先于
+                    # PATH，只配 PATH 会静默加载旧版并崩在 "requested API version
+                    # ... is not available"。exe 自身目录排在 System32 之前，拷这里必胜。
+                    # 用 GLOB 一次拷全：CPU 版只有 onnxruntime.dll，GPU 版还多出
+                    # onnxruntime_providers_cuda.dll / _shared.dll，少拷一个就起不来
+                    file(GLOB onnxruntime_dlls "${ONNXRUNTIME_ROOT}/lib/*.dll")
+                    add_custom_command(TARGET ${cuda_example} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                                ${onnxruntime_dlls}
+                                "$<TARGET_FILE_DIR:${cuda_example}>"
+                        COMMENT "Copying ONNX Runtime DLLs next to ${cuda_example}")
+                    message(STATUS "CUDA example: ${cuda_example} (+ ONNX Runtime)")
+                else()
+                    message(STATUS "CUDA example: ${cuda_example}")
+                endif()
             endif()
         endforeach()
     else()
