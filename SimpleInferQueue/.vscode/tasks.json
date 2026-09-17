@@ -1,0 +1,50 @@
+{
+    // 用 CMake Tools 提供的 cmake 任务类型，命令作用于「当前激活的 configure preset」，
+    // 因此文件里不含生成器名、构建产物路径或任何本机绝对路径。
+    // 换机器只要选对 preset（见 CMakePresets.json），这些任务原样可用。
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: 配置",
+            "detail": "按当前 preset 重新 configure",
+            "type": "cmake",
+            "command": "configure",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: 构建",
+            "detail": "构建全部目标（含 CUDA 示例，若本机有 CUDA）",
+            "type": "cmake",
+            "command": "build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: 重新构建",
+            "detail": "清掉后完整重建",
+            "type": "cmake",
+            "command": "cleanRebuild",
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: 运行测试",
+            "detail": "跑 siq_tests（GoogleTest）",
+            "type": "cmake",
+            "command": "test",
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: 清理",
+            "type": "cmake",
+            "command": "clean",
+            "problemMatcher": []
+        }
+    ]
+}

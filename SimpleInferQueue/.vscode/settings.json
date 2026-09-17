@@ -1,0 +1,21 @@
+{
+    // 只用 CMakePresets.json 驱动配置，不再用 cmake.sourceDirectory +
+    // cmake.configureSettings —— 两条路径并存时谁生效不好判断，
+    // 出问题也很难查。预设文件本身就是跨机器可提交的那一份。
+    "cmake.useCMakePresets": "always",
+    "cmake.configureOnOpen": true,
+
+    // 让 IntelliSense 走 CMake Tools：include 路径、-D 宏（含 MODEL_PATH）、
+    // 编译标准全部由 CMake 的实际配置结果供给，不需要在
+    // c_cpp_properties.json 里手写任何绝对路径
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+
+    // .cu 默认不被 C/C++ 扩展当作 C++ 处理，不关联的话打开就是一片红
+    "files.associations": {
+        "*.cu": "cuda-cpp",
+        "*.cuh": "cuda-cpp"
+    },
+
+    // 格式化以仓库根的 .clang-format 为准
+    "C_Cpp.clang_format_style": "file"
+}

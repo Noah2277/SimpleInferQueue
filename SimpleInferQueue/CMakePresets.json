@@ -1,0 +1,107 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 23,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "windows",
+            "displayName": "Windows (Visual Studio 2022)",
+            "description": "MSVC 工具链。CUDA 与 ONNX Runtime 都是可选依赖，缺失时对应示例自动跳过。",
+            "inherits": "base",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "generator": "Visual Studio 17 2022"
+        },
+        {
+            "name": "ninja",
+            "displayName": "Ninja (跨平台)",
+            "description": "单配置生成器，会产出 compile_commands.json，适合 clangd / 非 MSVC 工具链。",
+            "inherits": "base",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "ci",
+            "displayName": "CI (Linux, 无 CUDA)",
+            "description": "与 .github/workflows 对齐：只跑队列测试与基准，不碰 CUDA / ONNX Runtime。",
+            "inherits": "base",
+            "condition": {
+                "type": "notEquals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "windows-debug",
+            "displayName": "Windows Debug",
+            "configurePreset": "windows",
+            "configuration": "Debug"
+        },
+        {
+            "name": "windows-release",
+            "displayName": "Windows Release",
+            "configurePreset": "windows",
+            "configuration": "Release"
+        },
+        {
+            "name": "ninja-debug",
+            "displayName": "Ninja Debug",
+            "configurePreset": "ninja"
+        },
+        {
+            "name": "ci",
+            "displayName": "CI",
+            "configurePreset": "ci"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "windows-debug",
+            "displayName": "Windows Debug",
+            "configurePreset": "windows",
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "ninja-debug",
+            "displayName": "Ninja Debug",
+            "configurePreset": "ninja",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "ci",
+            "displayName": "CI",
+            "configurePreset": "ci",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

@@ -19,9 +19,34 @@ x86/
 *.o
 *.out
 
+# 按需下载的第三方依赖（如解压后的 ONNX Runtime），体积大且可从上游重新获取
+third_party/
+
+# clangd / 工具链产出的编译数据库（CMakePresets 里已开 CMAKE_EXPORT_COMPILE_COMMANDS）
+compile_commands.json
+
+# 模型文件（二进制，由 models/ 下的导出脚本从 PyTorch 生成，不入库）
+# .onnx.data 是权重外置时的伴生文件：权重内嵌在 .onnx 里时它是空的，
+# 是 torch 导出器留下的产物；模型变大、权重被自动外置时它会顶上用
+*.onnx
+*.onnx.data
+
 # IDE
 .vs/
-.vscode/
+# .vscode/ 整体忽略，但白名单放行下面几份配置：
+# 它们只依赖 CMakePresets.json 和 ms-vscode.cmake-tools，不含本机路径，值得共享。
+# 三个细节都不能省：
+#   1. 开头的 `**/` —— 中间带斜杠的模式默认锚定到本文件所在目录，
+#      写成 `.vscode/*` 就管不到子目录里的 SimpleInferQueue/.vscode/
+#   2. 结尾写 `/*` 而不是 `/` —— 父目录被整体排除后，再用 ! 放行其中的文件是无效的，
+#      Git 根本不会进入被排除的目录
+#   3. 白名单也要带 `**/`，否则放行同样作用不到子目录
+**/.vscode/*
+!**/.vscode/settings.json
+!**/.vscode/c_cpp_properties.json
+!**/.vscode/tasks.json
+# 本机专属覆盖（ONNX Runtime 路径、构建目录等），各写各的，不入库
+CMakeUserPresets.json
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
