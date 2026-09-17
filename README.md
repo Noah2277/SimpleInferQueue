@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Noah2277/SimpleInferQueue/actions/workflows/ci.yml/badge.svg)
 
-一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务演示与 4 个逐步演进的 CUDA GPU 流水线示例。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
+一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务演示、4 个逐步演进的 CUDA GPU 流水线示例，以及一个接入 ONNX Runtime 跑真实模型（MobileNetV2）的推理示例。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
 
 ## 项目特性
 
@@ -10,6 +10,7 @@
 - **Michael-Scott 无锁队列**：MPMC（多生产者-多消费者），链表 + 哑节点设计
 - **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 自动验证
 - **GPU 流水线示例**：4 个 CUDA 演进版本（同步基线 → 缓冲池 → 多流 → 双向流水线），附本机实测性能对照
+- **真实模型推理**：v5 把模拟负载换成 ONNX Runtime + MobileNetV2，可切换 CPU / CUDA 执行提供程序、对比不同 batch，附实测数据与取舍分析
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 - **开源协议**：MIT License，可自由使用、修改与分发
@@ -55,11 +56,17 @@ SimpleInferQueue/
 ├── examples/
 │   ├── demo_producer_consumer.cpp       # 阻塞队列多线程演示
 │   ├── mock_inference.cpp               # 模拟AI推理服务集成演示
-│   └── cuda_pipeline/                   # CUDA GPU 流水线示例（4 个演进版本，可选构建）
+│   └── cuda_pipeline/                   # CUDA GPU 流水线示例（可选构建）
 │       ├── v1_sync_baseline.cu          # v1 同步基线（默认流 + 同步拷贝，无池）
 │       ├── v2_mempool_sync.cu           # v2 显存缓冲池 + 回收线程（单消费者同步）
 │       ├── v3_multistream_pool.cu       # v3 多流全异步 + 缓冲池
-│       └── v4_bidirectional.cu          # v4 双向流水线（生产/消费/输出/回收）
+│       ├── v4_bidirectional.cu          # v4 双向流水线（生产/消费/输出/回收）
+│       └── v5_onnx_inference.cu         # v5 真实模型推理（ONNX Runtime + MobileNetV2，可选构建）
+├── models/                              # ONNX 模型导出脚本（Python/PyTorch；产出的 *.onnx 不入库）
+│   ├── export_mobilenet.py              # MobileNetV2，batch = 1
+│   ├── export_mobilenet_batch32.py      # MobileNetV2，batch = 32
+│   ├── export_mobilenet_batch64.py      # MobileNetV2，batch = 64
+│   └── export_model.py                  # 4→2 定值权重小模型（供数值验证，期望输出可手算）
 ├── tests/
 │   ├── test_ring_buffer.cpp             # 环形缓冲区单元测试（FIFO/边界/回绕）
 │   ├── test_block_queue.cpp             # 阻塞队列测试（try 接口 + 多线程）
@@ -70,6 +77,7 @@ SimpleInferQueue/
 ├── .github/workflows/ci.yml             # 三平台 CI + TSAN 数据竞争检测 + clang-format 检查
 ├── .clang-format
 ├── LICENSE                              # MIT License
+├── CMakePresets.json                    # 跨机器可复用的 configure/build/test 预设
 └── CMakeLists.txt
 ```
 
@@ -95,6 +103,7 @@ SimpleInferQueue/
 - CMake ≥ 3.16
 - 支持 C++17 的编译器（MSVC / GCC / Clang）
 - CUDA Toolkit（可选，仅构建 `examples/cuda_pipeline/` 的 GPU 流水线示例时需要；未安装时 CMake 自动跳过，不影响其余部分）
+- ONNX Runtime（可选，仅构建 `examples/cuda_pipeline/v5_onnx_inference.cu` 时需要）。查找顺序：`ONNXRUNTIME_ROOT` 环境变量 → `third_party/onnxruntime` → 都没命中则该示例自动跳过，不影响其余部分；也可用 `-DONNXRUNTIME_ROOT=<ORT 解压根目录>` 直接指定
 - 首次构建会通过 FetchContent 从 GitHub 下载 GoogleTest 与 Google Benchmark 源码（仅测试/基准需要，可分别用 `-DSIMPLEINFERQUEUE_BUILD_TESTS=OFF` / `-DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF` 关闭；CUDA 示例可用 `-DSIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES=OFF` 关闭）
 
 ### 构建
@@ -135,6 +144,9 @@ ctest --test-dir build -C Release --output-on-failure
 
 # CUDA 流水线示例（仅在检测到 CUDA Toolkit 时构建，详见下文「CUDA 流水线示例」）
 ./v1_sync_baseline  ./v2_mempool_sync  ./v3_multistream_pool  ./v4_bidirectional
+
+# v5 真实模型推理（还需 ONNX Runtime，详见下文「v5：接入 ONNX Runtime 的真实模型推理」）
+./v5_onnx_inference --gpu     # 默认走 CUDA；--cpu 切换到 CPU 执行提供程序
 ```
 
 ## 安装与下游使用
@@ -193,7 +205,9 @@ clang-format --dry-run --Werror <file>
 
 ## CUDA 流水线示例：从同步到双向流水线
 
-`examples/cuda_pipeline/` 下是 4 个逐步演进的 CPU-GPU 流水线版本，展示推理场景中从「能用」到「生产级」的优化路径。构建时 CMake 自动探测 CUDA Toolkit：本机安装则编译，未安装（如 CI 的无 GPU runner）则静默跳过。
+`examples/cuda_pipeline/` 下的 v1~v4 是 4 个逐步演进的 CPU-GPU 流水线版本，展示推理场景中从「能用」到「生产级」的优化路径。构建时 CMake 自动探测 CUDA Toolkit：本机安装则编译，未安装（如 CI 的无 GPU runner）则静默跳过。
+
+> v1~v4 用向量加法**模拟**推理负载，重点在流水线编排；接真实模型的是 v5，见下文「v5：接入 ONNX Runtime 的真实模型推理」。
 
 测试环境：RTX 5060 Laptop GPU / CUDA 12.8 / Windows MSVC Release / 100 个任务 × 65536 元素向量加法 / 缓冲池 4 块。
 
@@ -230,6 +244,53 @@ cmake --build build --config Release --target v4_bidirectional   # 换成其他�
 ```
 
 四个版本输出格式一致（PASS + 耗时 + 吞吐），可直接对比。
+
+## v5：接入 ONNX Runtime 的真实模型推理
+
+v1~v4 的「推理」是向量加法。v5 把这一层换成**真实模型**：ONNX Runtime + MobileNetV2，输入 `[B, 3, 224, 224]`、输出 `[B, 1000]`。结构上仍是「生产者投递 → `MSQueue` → 3 个消费者并发 `session.Run()`」，变的是负载终于真的在算卷积了。
+
+模型需要先用 `models/` 下的脚本从 PyTorch 导出（`*.onnx` 是二进制、不入库）：
+
+```bash
+pip install torch torchvision onnx
+python models/export_mobilenet_batch64.py     # 生成 models/mobilenet_batch64.onnx
+```
+
+### 构建与运行
+
+```bash
+cmake -S SimpleInferQueue -B build -DONNXRUNTIME_ROOT=<ORT 解压根目录>
+cmake --build build --config Release --target v5_onnx_inference
+./v5_onnx_inference --gpu      # 或 --cpu
+```
+
+### 三个容易踩的坑
+
+- **模型的 batch 必须和源码顶部的 `BATCH` 常量一致**。`BATCH` / `IN_C` / `IN_H` / `IN_W` / `OUT_SIZE` 这组常量与 `models/export_mobilenet_batch*.py` 一一对应，改一边必须改另一边。喂错模型时，`session.Run()` 抛出的形状异常发生在消费者线程里、没人接，会直接 `terminate` 掉整个进程——而 stdout 是块缓冲，`abort` 不走正常退出流程，**连崩溃前已经执行到的日志都一个字看不到**，表现为「静默退出、零输出」。排查这种问题时，先把 stdout 重定向关掉看能不能拿到输出。
+- **不要只配 `PATH` 找 ONNX Runtime**。Windows 的 DLL 搜索顺序里 `System32` 优先于 `PATH`，系统里如果装着别的 ONNX Runtime 版本，会被静默加载、然后崩在 API 版本不匹配上。CMake 的 `POST_BUILD` 会把 ORT 的 `.dll` 复制到 exe 同目录——exe 自身目录排在 `System32` 之前，这样才稳。
+- **模型路径由 CMake 以绝对路径注入**，不依赖当前工作目录；exe 在 `build/Release/` 下也能直接跑。
+
+### 实测：batch 决定 CPU 和 GPU 谁赢
+
+测试环境：RTX 5060 Laptop / CUDA 12.8 / Windows MSVC Release / ONNX Runtime 1.30.0 / 100 个 task / 3 个消费者线程。
+
+| 模型 batch | 1 个 task | CPU 每张图 | GPU 每张图 |
+| :--- | :--- | :--- | :--- |
+| 1 | 1 张 | 2.18 ms（458 img/s） | 6.69 ms（150 img/s） |
+| 32 | 32 张 | 3.52 ms（284 img/s） | 0.786 ms（1273 img/s） |
+| 64 | 64 张 | 3.23 ms（310 img/s） | **0.711 ms（1407 img/s）** |
+
+**必须先换算成「每张图」**：`tasks/s` 在不同 batch 之间不可比（1 个 task 分别是 1 / 32 / 64 张图），直接比会得出完全相反的结论。
+
+- **batch=1 时 CPU 反超 GPU 约 3 倍**。固定开销（H2D 拷贝、kernel launch、同步）远大于 MobileNet 本身的计算量，GPU 大部分时间在等，不在算。
+- **batch=32 时 GPU 反超约 4.5 倍**。固定开销摊薄到 32 张图上，这才是 GPU 该有的样子。
+- **batch 加到 64，收益明显放缓**（每张图只再降约 10%）。说明 32 之后已经进入算力瓶颈，**再加 batch 不是那个杠杆了**。
+- **CPU 恰好相反，batch=1 才是最优**。批处理不会让 CPU 的 SIMD 宽度变宽，却让工作集和中间激活值暴涨、冲垮缓存，反而把并行度吃掉了。
+- 3 个消费者线程在 GPU 侧共享同一条 CUDA 流，计算实际被串行化——**GPU 真正吃到的是 batch，不是线程数**。想继续榨 GPU，方向是多流，不是加线程。
+
+> **CPU 和 GPU 的输出不是逐位相同的，这不是 bug。** cuDNN 会按 batch 大小选不同的卷积算法，且默认启用 TF32，尾数精度低于 FP32。实测同一张图，CPU 在 batch 1 / 32 / 64 下输出**逐位一致、完全可复现**，而 GPU 三个 batch **各不相同**。做结果校验时请按 FP32 的容差比，不要期待逐位相等。
+
+> **v5 打印的 `PASS` 只检查「任务数跑满 + 输出维度正确」，不校验数值是否算对。** 想做数值校验，可参考 `models/export_model.py` 的做法：用一组写死的正整数权重、让 ReLU 不触发，期望输出就能手算 `Wx+b`，与推理引擎独立对账——注意 v5 顶部的常量是按 MobileNet 写死的，换模型要同步改那组常量。
 
 ## 模拟推理服务器运行效果
 
