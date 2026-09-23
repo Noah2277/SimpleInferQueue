@@ -161,15 +161,23 @@ int main() {
     
     // 清理
     for (int i = 0; i < NUM_TASKS; ++i) delete[] host_results[i];
-    for (int i = 0; i < POOL_SIZE; ++i) {
-        DeviceBufferBlock* block = nullptr;
-        // 这里简化处理：池中的块都在空闲队列里，但我们不重复释放
-        // 实际清理时可直接从 free_queue 取回并释放，或手动管理
-        cudaFree(block->d_A); // 注意：这里需要正确取出块，示例代码未完整展开
+
+    // 块在每次任务完成后都会 Push 回 free_queue（见消费者末尾的 free_queue.Push(task.block)），
+    // 所以这里从队列里逐个取回来释放。用 try_Pop 而不是 Pop：
+    // Pop() 是阻塞的，万一上面提前 break 有块没回来，阻塞版会永久挂住；
+    // 非阻塞版宁可漏释放也不死等
+    int freed = 0;
+    DeviceBufferBlock* block = nullptr;
+    while (free_queue.try_Pop(block)) {
+        cudaFree(block->d_A);
         cudaFree(block->d_B);
         cudaFree(block->d_C);
         cudaEventDestroy(block->done_event);
         delete block;
+        ++freed;
+    }
+    if (freed != POOL_SIZE) {
+        printf("WARNING: 只回收了 %d / %d 个缓冲块\n", freed, POOL_SIZE);
     }
 
     return success ? 0 : 1;

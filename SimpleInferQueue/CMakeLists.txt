@@ -141,6 +141,109 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
             message(STATUS "ONNX Runtime not found at ${ONNXRUNTIME_ROOT} - onnx examples will be skipped")
         endif()
 
+        # TensorRT / cuDNN（可选依赖）：只有源码里真的挂了 TensorRT EP 的示例才需要。
+        # 编译期不需要 TRT 的 include 和导入库——OrtTensorRTProviderOptions 和
+        # AppendExecutionProvider_TensorRT 都声明在 ORT 自己的头文件里
+        # （onnxruntime_cxx_api.h），所以这里要解决的纯粹是「运行期 DLL 能被加载」。
+        #
+        # 为什么不配 PATH 而是拷到 exe 旁：机器上 PATH 里可能已经有别的软件自带的
+        # nvinfer_10.dll（本机 HP OMEN Broadcast 就带了一个），谁先被搜到全看 PATH
+        # 顺序；exe 同目录永远排在 System32 和 PATH 之前，拷这里必胜。
+        # 本机路径同样写在 CMakeUserPresets.json（不入库），不写死在这份文件里。
+        if(DEFINED ENV{TENSORRT_ROOT})
+            set(_trt_default "$ENV{TENSORRT_ROOT}")
+        else()
+            set(_trt_default "")
+        endif()
+        set(TENSORRT_ROOT "${_trt_default}" CACHE PATH "TensorRT 解压根目录（DLL 在其 bin/ 下）")
+
+        # builder resource 按 GPU 架构分文件（sm75/80/86/89/90/100/120/ptx），
+        # 一个就有 260~450 MB，全拷要 1.9 GB，只能给本机架构那一份。
+        # 本机 RTX 50 系是 Blackwell => 120；查自己的值：
+        #   nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+        # 留空则不拷它：引擎缓存命中时不影响，首次现场构图会失败。
+        set(TENSORRT_BUILDER_SM "" CACHE STRING "TensorRT builder resource 的 SM 版本号（如 120）")
+
+        # cuDNN 也只要运行期可见。设了 CUDNN_ROOT 就拷到 exe 旁（565 MB），
+        # 不设则靠 PATH。官方 zip 解出来的 DLL 在 bin/x64/，不是 bin/。
+        set(CUDNN_ROOT "" CACHE PATH "cuDNN 解压根目录（DLL 在 bin/ 或 bin/x64/）")
+
+        # TRT 的 DLL 几乎不静态依赖任何库（导入表里只有系统 DLL），
+        # nvinfer_builder_resource_* / plugin 这些都是 nvinfer_10.dll 运行期 dlopen 的，
+        # 所以必须和 nvinfer_10.dll 待在同一个目录，缺一个就在构图时炸
+        # （实测：这 6 个 DLL 放进 exe 目录后，全新缓存现场构图能成功）
+        set(TENSORRT_RUNTIME_DLLS "")
+        if(EXISTS "${TENSORRT_ROOT}/bin/nvinfer_10.dll")
+            foreach(_trt_dll nvinfer_10 nvonnxparser_10 nvinfer_plugin_10
+                             nvinfer_lean_10 nvinfer_dispatch_10)
+                if(EXISTS "${TENSORRT_ROOT}/bin/${_trt_dll}.dll")
+                    list(APPEND TENSORRT_RUNTIME_DLLS "${TENSORRT_ROOT}/bin/${_trt_dll}.dll")
+                endif()
+            endforeach()
+            if(TENSORRT_BUILDER_SM)
+                set(_trt_builder "${TENSORRT_ROOT}/bin/nvinfer_builder_resource_sm${TENSORRT_BUILDER_SM}_10.dll")
+                if(EXISTS "${_trt_builder}")
+                    list(APPEND TENSORRT_RUNTIME_DLLS "${_trt_builder}")
+                else()
+                    message(WARNING "TENSORRT_BUILDER_SM=${TENSORRT_BUILDER_SM} 对应的 builder "
+                                    "resource 不存在：首次现场构图会失败")
+                endif()
+            else()
+                message(WARNING "TENSORRT_BUILDER_SM 未设置：首次现场构造 TRT 引擎会因缺 "
+                                "nvinfer_builder_resource_sm<NN>_10.dll 失败")
+            endif()
+        endif()
+
+        set(CUDNN_RUNTIME_DLLS "")
+        if(CUDNN_ROOT)
+            if(EXISTS "${CUDNN_ROOT}/bin/cudnn64_9.dll")
+                set(_cudnn_dll_dir "${CUDNN_ROOT}/bin")
+            elseif(EXISTS "${CUDNN_ROOT}/bin/x64/cudnn64_9.dll")
+                set(_cudnn_dll_dir "${CUDNN_ROOT}/bin/x64")
+            else()
+                set(_cudnn_dll_dir "")
+                message(WARNING "CUDNN_ROOT=${CUDNN_ROOT} 下没找到 cudnn64_9.dll（bin/ 或 bin/x64/）")
+            endif()
+            if(_cudnn_dll_dir)
+                file(GLOB CUDNN_RUNTIME_DLLS "${_cudnn_dll_dir}/cudnn*.dll")
+            endif()
+        endif()
+
+        # ============ TensorRT 原生封装库（可选） ============
+        # src/tensorrt_engine.cpp 直接调 TensorRT 原生 API（#include <NvInfer.h>、
+        # nvinfer1::），这和上面 v6 走 ORT 那条路有本质区别：v6 编译期完全不需要
+        # TRT 的任何东西（OrtTensorRTProviderOptions 声明在 ORT 自己的头文件里），
+        # 只要运行期 DLL 能被加载；这条要 include 目录 + 导入库，是真正的编译期依赖。
+        #
+        # 建 STATIC 库而不是把 .cpp 直接塞进每个示例，有两个原因：
+        #   1. 它是独立组件，v7 和以后的版本共用
+        #   2. 只有进了某个 target，VS Code 的 C/C++ 扩展（走 CMake File API）
+        #      才能给它算出 include 路径。不在任何 target 里的文件，编辑器里连
+        #      #include "tensorrt_engine.h" 都报「无法打开源文件」——这正是加这个
+        #      目标之前的症状。
+        set(SIMPLEINFERQUEUE_TRT_AVAILABLE OFF)
+        if(EXISTS "${TENSORRT_ROOT}/include/NvInfer.h"
+           AND EXISTS "${TENSORRT_ROOT}/lib/nvinfer_10.lib")
+            # 跟随 FindCUDAToolkit 找到的那份 nvcc，要换用 -DCUDAToolkit_ROOT=
+            find_package(CUDAToolkit REQUIRED)
+            add_library(siq_trt STATIC src/tensorrt_engine.cpp)
+            add_library(SimpleInferQueue::TRT ALIAS siq_trt)
+
+            # tensorrt_engine.h 里 include 了 <NvInfer.h> 和 <cuda_runtime.h>，
+            # 凡是 include 它的目标都得拿到这两条路径——所以是 PUBLIC 不是 PRIVATE
+            target_include_directories(siq_trt PUBLIC "${TENSORRT_ROOT}/include")
+            # SimpleInferQueue 是 INTERFACE 库，PUBLIC 链接把 include/ 一并传下去
+            target_link_libraries(siq_trt PUBLIC
+                SimpleInferQueue::SimpleInferQueue
+                CUDA::cudart
+                "${TENSORRT_ROOT}/lib/nvinfer_10.lib")
+            set(SIMPLEINFERQUEUE_TRT_AVAILABLE ON)
+            message(STATUS "TensorRT native wrapper: siq_trt (${TENSORRT_ROOT})")
+        else()
+            message(STATUS "TensorRT native wrapper skipped - "
+                           "${TENSORRT_ROOT}/include/NvInfer.h 或 lib/nvinfer_10.lib 不存在")
+        endif()
+
         # 自动发现 examples/cuda_pipeline/ 下的 .cu，每个文件一个可执行目标：
         # - file(GLOB CONFIGURE_DEPENDS) 监视「目录列表」——以后新增 .cu 文件时，
         #   cmake --build 会自动重新配置并加入新目标
@@ -167,8 +270,108 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
                     continue()
                 endif()
 
+                # 名字先打，后面的 "+ ..." 细节行才看得出属于谁。
+                # 之前名字是最后打的，输出读起来像是挂在「前一个」示例下面
+                if(cuda_ort_pos GREATER -1)
+                    message(STATUS "CUDA example: ${cuda_example} (+ ONNX Runtime)")
+                else()
+                    message(STATUS "CUDA example: ${cuda_example}")
+                endif()
+
                 add_executable(${cuda_example} ${cuda_source})
                 target_link_libraries(${cuda_example} PRIVATE SimpleInferQueue::SimpleInferQueue)
+
+                # 按源码内容判断需要 TRT 的哪一层。两个标志独立判、不写成
+                # if/else——两者并非互斥：_needs_trt_runtime 要拷运行期 DLL，
+                # _needs_trt_native 要链原生封装库。
+                # 这段必须在 ORT 分支**外面**：纯原生示例（直接用 TensorRTEngine
+                # 读 .engine、源码不含 onnxruntime）走的是 else 分支，留在里面的话
+                # 它既链不上 siq_trt、也拷不到 nvinfer_10.dll
+                set(_trt_runtime_patterns
+                    "OrtTensorRT"
+                    "AppendExecutionProvider_TensorRT"
+                    "tensorrt_engine.h")
+                set(_trt_native_patterns
+                    "tensorrt_engine.h"
+                    "nvinfer1")
+
+                set(_needs_trt_runtime OFF)
+                foreach(_pat IN LISTS _trt_runtime_patterns)
+                    string(FIND "${cuda_example_content}" "${_pat}" _trt_pos)
+                    if(_trt_pos GREATER -1)
+                        set(_needs_trt_runtime ON)
+                    endif()
+                endforeach()
+
+                set(_needs_trt_native OFF)
+                foreach(_pat IN LISTS _trt_native_patterns)
+                    string(FIND "${cuda_example_content}" "${_pat}" _trt_pos)
+                    if(_trt_pos GREATER -1)
+                        set(_needs_trt_native ON)
+                    endif()
+                endforeach()
+
+                # 原生路线只需链接：TRT 的 include 路径和导入库由 siq_trt
+                # 以 PUBLIC 带出来，示例这侧不用重复写
+                if(_needs_trt_native)
+                    if(SIMPLEINFERQUEUE_TRT_AVAILABLE)
+                        target_link_libraries(${cuda_example} PRIVATE SimpleInferQueue::TRT)
+                    else()
+                        message(WARNING "${cuda_example} 用了 TensorRT 原生 API，但 "
+                                        "TENSORRT_ROOT 没配全（需要 include/NvInfer.h "
+                                        "和 lib/nvinfer_10.lib）——这个示例会构建失败")
+                    endif()
+                endif()
+
+                # 纯原生示例的模型路径。这里没有 ORT 分支那套「读源码里的 BATCH
+                # 反推文件名」可用——原生示例源码里根本不写 BATCH，输入输出大小
+                # 一律从 engine 自己查（input_size()/output_size()），所以无从推导，
+                # 只能按 models/*.engine 取。
+                # .engine 是 .gitignore 掉的派生产物（.gitignore:38），新克隆的仓库
+                # 里一个都没有：必须 WARNING 说清楚，否则会安静地编出一个能跑、
+                # 一跑才在消费者线程里 exit(1) 的 exe
+                if(_needs_trt_native)
+                    file(GLOB _engine_files "${CMAKE_CURRENT_SOURCE_DIR}/models/*.engine")
+                    # GLOB 不保证顺序，排序后多引擎时选中的那个才可复现。
+                    # 注意是字典序：batch128 会排在 batch32 前面
+                    list(SORT _engine_files)
+                    list(LENGTH _engine_files _engine_count)
+                    if(_engine_count GREATER 0)
+                        list(GET _engine_files 0 _engine_file)
+                        target_compile_definitions(${cuda_example} PRIVATE
+                            "ENGINE_PATH=\"${_engine_file}\"")
+                        get_filename_component(_engine_name "${_engine_file}" NAME)
+                        message(STATUS "  + engine: ${_engine_name}")
+                        if(_engine_count GREATER 1)
+                            message(STATUS "  + models/ 下有 ${_engine_count} 个 .engine，"
+                                            "默认取字典序第一个；运行时可用 argv[1] 换")
+                        endif()
+                    else()
+                        message(WARNING "${cuda_example} 要读 .engine，但 models/ 下没有——"
+                                        "引擎由 .onnx 导出、不进版本库，先用 trtexec "
+                                        "生成再跑这个示例")
+                    endif()
+                endif()
+
+                # 运行期 DLL：原生示例要 nvinfer_10.dll，ORT 的 TRT EP 也要，同一份
+                if(_needs_trt_runtime)
+                    if(TENSORRT_RUNTIME_DLLS)
+                        add_custom_command(TARGET ${cuda_example} POST_BUILD
+                            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                                    ${TENSORRT_RUNTIME_DLLS}
+                                    "$<TARGET_FILE_DIR:${cuda_example}>"
+                            COMMENT "Copying TensorRT DLLs next to ${cuda_example}")
+                        list(LENGTH TENSORRT_RUNTIME_DLLS _trt_dll_count)
+                        message(STATUS "  + TensorRT runtime: ${_trt_dll_count} DLLs (sm${TENSORRT_BUILDER_SM})")
+                    else()
+                        # 不中断构建：ORT 路线下 TRT EP 的代码能编过（符号在 ORT 头里），
+                        # 只是运行期挂 provider 会失败；纯原生路线则由上面的
+                        # _needs_trt_native 分支报「构建失败」。两条都用 WARNING 说清楚
+                        message(WARNING "${cuda_example} 需要 TensorRT 运行期，但 TENSORRT_ROOT "
+                                        "没配（或 ${TENSORRT_ROOT}/bin 下没有 nvinfer_10.dll）——"
+                                        "ORT 的 TRT EP 能编过，但运行时挂 provider 会失败")
+                    endif()
+                endif()
 
                 if(cuda_ort_pos GREATER -1)
                     target_include_directories(${cuda_example} PRIVATE "${ONNXRUNTIME_ROOT}/include")
@@ -179,13 +382,26 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
                     # 内层引号必须转义：不转义的话 CMake 解析参数时会把这层引号
                     # 吃掉，宏展开后变成裸标记 D:/... 而不是字符串字面量，编译报错
                     #
-                    # 注入 mobilenet_batch64.onnx（models/export_mobilenet_batch64.py 的产物），
-                    # 不是 model.onnx / mobilenet.onnx——示例里 BATCH/IN_C/IN_H/IN_W/OUT_SIZE
-                    # 是按 64x3x224x224 -> 64x1000 写死的，喂错模型会在 session.Run()
-                    # 抛形状不匹配异常，而线程里没人接，直接 terminate 掉整个进程
-                    # （且 stdout 是块缓冲，什么日志都看不到）
+                    # 模型跟着源码里的 BATCH 常量走，而不是写死某个文件名：
+                    # 示例里 BATCH/IN_C/IN_H/IN_W/OUT_SIZE 与模型规格本来就要求
+                    # 一一对应，喂错会在 session.Run() 抛形状不匹配异常，而异常
+                    # 发生在消费者线程里没人接，直接 terminate 掉整个进程，且
+                    # stdout 是块缓冲，什么日志都看不到（这个坑踩过一次）。
+                    # 自动配对消掉「改了 BATCH 忘了换模型」这一类崩溃，
+                    # 也让 v5/v6 能各用各的 batch 而不用共用同一个宏
+                    string(REGEX MATCH "BATCH[ \t]*=[ \t]*([0-9]+)" _batch_match "${cuda_example_content}")
+                    if(_batch_match)
+                        set(_model_file "mobilenet_batch${CMAKE_MATCH_1}.onnx")
+                    else()
+                        set(_model_file "mobilenet_batch64.onnx")
+                    endif()
+                    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models/${_model_file}")
+                        message(WARNING "${cuda_example} 的 BATCH 推出模型 ${_model_file}，"
+                                        "但 models/ 下没有——先跑对应的导出脚本，"
+                                        "否则运行时会直接 terminate 且无日志")
+                    endif()
                     target_compile_definitions(${cuda_example} PRIVATE
-                        "MODEL_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/models/mobilenet_batch64.onnx\"")
+                        "MODEL_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/models/${_model_file}\"")
                     # ORT 的 DLL 必须与 exe 同目录：本机 System32 里残留着旧版
                     # onnxruntime.dll(1.17)，而 Windows 搜索顺序里 System32 优先于
                     # PATH，只配 PATH 会静默加载旧版并崩在 "requested API version
@@ -198,9 +414,29 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
                                 ${onnxruntime_dlls}
                                 "$<TARGET_FILE_DIR:${cuda_example}>"
                         COMMENT "Copying ONNX Runtime DLLs next to ${cuda_example}")
-                    message(STATUS "CUDA example: ${cuda_example} (+ ONNX Runtime)")
-                else()
-                    message(STATUS "CUDA example: ${cuda_example}")
+
+                    # TRT 引擎缓存目录：ORT 的 TRT EP 专有，纯原生示例不用这个宏，
+                    # 所以留在 ORT 分支里（siq_trt 链接和运行期 DLL 已移到分支外）。
+                    # 必须从源码外注入绝对路径：源码里写 "./trt_cache" 会按「当前
+                    # 工作目录」解析，从 build/ 跑就落到 build/ 下，和 MODEL_PATH
+                    # 同一类坑。用 $<TARGET_FILE_DIR:> 而不是 ${CMAKE_CURRENT_BINARY_DIR}：
+                    # 后者在多配置生成器（VS）下是 build 根，不是 build/Debug
+                    if(_needs_trt_runtime)
+                        target_compile_definitions(${cuda_example} PRIVATE
+                            "TRT_CACHE_PATH=\"$<TARGET_FILE_DIR:${cuda_example}>/trt_cache\"")
+                    endif()
+
+                    # cuDNN 单独判、不放进 _needs_trt_runtime：那组关键词只命中 v6，
+                    # 而走 CUDA EP 的 v5 也要 cuDNN。将来加了纯 CPU 的 ONNX 示例，
+                    # 这里得补条件，否则白拷 565 MB
+                    if(CUDNN_RUNTIME_DLLS)
+                        add_custom_command(TARGET ${cuda_example} POST_BUILD
+                            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                                    ${CUDNN_RUNTIME_DLLS}
+                                    "$<TARGET_FILE_DIR:${cuda_example}>"
+                            COMMENT "Copying cuDNN DLLs next to ${cuda_example}")
+                        message(STATUS "  + cuDNN runtime DLLs")
+                    endif()
                 endif()
             endif()
         endforeach()

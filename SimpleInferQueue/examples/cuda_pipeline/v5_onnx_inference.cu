@@ -30,7 +30,8 @@ struct InferenceTask {
 //结果结构体：存输出向量
 struct InferenceResult {
     int task_id;
-    std::vector<float> output; //推理输出
+    std::vector<float> output;  //推理输出
+    std::vector<int64_t> shape; //输出张量的真实形状（如 {64,1000}），供校验和打印
 };
 
 int main(int argc, char** argv) {
@@ -51,22 +52,23 @@ int main(int argc, char** argv) {
     session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     if(use_cuda) {
-        auto providers = Ort::GetAvailableProviders();
+        //探测 CUDA EP 是否可用：取决于 ORT 能否在 exe 同目录加载到
         bool cuda_available = false;
-        for(const auto& p : providers) {
-            if(std::string(p) == "CUDAExecutionProvider") {
-                cuda_available = true;
-                break;
-            }
+        for(const auto& p : Ort::GetAvailableProviders()) {
+            printf("  provider: %s\n", p.c_str());
+            if(p == "CUDAExecutionProvider") cuda_available = true;
         }
 
+        //一个 EP 都不 Append 时，ORT 用的是内置 CPU EP（c_api.h:1457），
+        //所以下面这个分支不是「选 CUDA 还是 CPU」，而是「要不要挂 CUDA」
         if(cuda_available) {
-        OrtCUDAProviderOptions cuda_options;
-        cuda_options.device_id = 0;
-        session_options.AppendExecutionProvider_CUDA(cuda_options);
-        printf("Backend: CUDA\n");
+            //OrtCUDAProviderOptions 带 C++ 构造函数（c_api.h:641），
+            OrtCUDAProviderOptions cuda_options{};
+            cuda_options.device_id = 0;
+            session_options.AppendExecutionProvider_CUDA(cuda_options);
+            printf("Backend: CUDA\n");
         } else {
-            printf("CUDA is not available, falling vack to CPU\n");
+            printf("CUDA is not available, falling back to CPU\n");
         }
     } else {
         printf("Backend: CPU\n");
@@ -134,13 +136,16 @@ int main(int argc, char** argv) {
                     
                     auto outoput_tensors = session.Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
 
-                    //取出输出
+                    //取出输出。形状要从张量本身读，不能拿源码里那几个常量去凑：
+                    //常量是「我以为的规格」，GetShape() 才是「ORT 实际算出来的」
+                    auto shape_info = outoput_tensors[0].GetTensorTypeAndShapeInfo();
                     float* output_data = outoput_tensors[0].GetTensorMutableData<float>();
-                    size_t output_count = outoput_tensors[0].GetTensorTypeAndShapeInfo().GetElementCount();
+                    size_t output_count = shape_info.GetElementCount();
 
                     InferenceResult result;
                     result.task_id = task.task_id;
                     result.output.assign(output_data, output_data + output_count);
+                    result.shape = shape_info.GetShape();
                     result_queue.Enqueue(result);
                     processed_count.fetch_add(1);
                 } else {
@@ -153,12 +158,14 @@ int main(int argc, char** argv) {
     //主线程：验证结果
     int verified = 0;
     std::vector<float> first_output;
+    std::vector<int64_t> first_shape;
     while(verified < NUM_TASKS) {
         InferenceResult result;
         if(result_queue.Dequeue(result)) {
            if(first_output.empty()) {
             first_output = result.output;
-           }    
+            first_shape = result.shape;
+           }
             verified++;
         } else {
             std::this_thread::yield();
@@ -184,7 +191,11 @@ int main(int argc, char** argv) {
     bool success = (processed_count.load() == NUM_TASKS && first_output.size() == OUT_SIZE);
     
     // 打印前5个输出，供和 Python 端对比
-    printf("Output shape: [1, %zu]\n", first_output.size());
+    printf("Output shape: [");
+    for(size_t i = 0; i < first_shape.size(); ++i) {
+        printf("%s%lld", i ? ", " : "", static_cast<long long>(first_shape[i]));
+    }
+    printf("]  (%zu floats)\n", first_output.size());
     printf("Output[:5]: ");
     for (int i = 0; i < 5 && i < (int)first_output.size(); ++i) {
         printf("%.6f ", first_output[i]);

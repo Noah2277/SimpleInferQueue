@@ -31,6 +31,14 @@ compile_commands.json
 *.onnx
 *.onnx.data
 
+# TensorRT 引擎（trtexec --saveEngine 产出）与其 timing cache：由上面这些 .onnx 生成，
+# 但绑死本机的 TRT 版本 + GPU 架构（sm_120），换机器/换 TRT 版本即失效，不入库。
+# ORT 自己在 build/ 下的引擎缓存已被上面的 build/ 规则覆盖，这里管的是 models/ 里的。
+# 只写 trt_timing.cache 不写 *.cache：后者会误伤 build/ 下 CMake 的 *.cu.cache 编译器探测文件
+*.engine
+trt_timing.cache
+trt_timing.cache.lock
+
 # IDE
 .vs/
 # .vscode/ 整体忽略，但白名单放行下面几份配置：

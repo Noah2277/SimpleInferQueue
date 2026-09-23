@@ -11,6 +11,7 @@
 - **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 自动验证
 - **GPU 流水线示例**：4 个 CUDA 演进版本（同步基线 → 缓冲池 → 多流 → 双向流水线），附本机实测性能对照
 - **真实模型推理**：v5 把模拟负载换成 ONNX Runtime + MobileNetV2，可切换 CPU / CUDA 执行提供程序、对比不同 batch，附实测数据与取舍分析
+- **TensorRT 两条路径**：v6 走 ONNX Runtime + TensorRT EP，v7 用裸 TensorRT API 自行封装，附「封装零开销」的对照测量与数据流分析
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 - **开源协议**：MIT License，可自由使用、修改与分发
@@ -48,7 +49,10 @@ SimpleInferQueue/
 │   ├── ring_buffer.h                    # 环形缓冲区（非线程安全）
 │   ├── block_queue.h                    # 互斥锁阻塞队列
 │   ├── lockfree_queue.h                 # CAS无锁队列（原子操作+内存序）
-│   └── ms_queue.h                       # Michael-Scott 无锁队列（MPMC，链表+哑节点）
+│   ├── ms_queue.h                       # Michael-Scott 无锁队列（MPMC，链表+哑节点）
+│   └── tensorrt_engine.h                # TensorRT 引擎封装（可选构建，v7 使用）
+├── src/
+│   └── tensorrt_engine.cpp              # 上述封装的实现（可选构建）
 ├── benchmarks/
 │   ├── bench_block_queue.cpp            # BlockQueue SPSC 吞吐基准（Google Benchmark）
 │   ├── bench_lockfree_queue.cpp         # LockFreeQueue SPSC 吞吐基准
@@ -61,7 +65,9 @@ SimpleInferQueue/
 │       ├── v2_mempool_sync.cu           # v2 显存缓冲池 + 回收线程（单消费者同步）
 │       ├── v3_multistream_pool.cu       # v3 多流全异步 + 缓冲池
 │       ├── v4_bidirectional.cu          # v4 双向流水线（生产/消费/输出/回收）
-│       └── v5_onnx_inference.cu         # v5 真实模型推理（ONNX Runtime + MobileNetV2，可选构建）
+│       ├── v5_onnx_inference.cu         # v5 真实模型推理（ONNX Runtime + MobileNetV2，可选构建）
+│       ├── v6_trt_inference.cu          # v6 ONNX Runtime + TensorRT EP（可选构建）
+│       └── v7_trt_native.cu             # v7 裸 TensorRT API 自封装（读 models/*.engine，可选构建）
 ├── models/                              # ONNX 模型导出脚本（Python/PyTorch；产出的 *.onnx 不入库）
 │   ├── export_mobilenet.py              # MobileNetV2，batch = 1
 │   ├── export_mobilenet_batch32.py      # MobileNetV2，batch = 32
@@ -103,7 +109,8 @@ SimpleInferQueue/
 - CMake ≥ 3.16
 - 支持 C++17 的编译器（MSVC / GCC / Clang）
 - CUDA Toolkit（可选，仅构建 `examples/cuda_pipeline/` 的 GPU 流水线示例时需要；未安装时 CMake 自动跳过，不影响其余部分）
-- ONNX Runtime（可选，仅构建 `examples/cuda_pipeline/v5_onnx_inference.cu` 时需要）。查找顺序：`ONNXRUNTIME_ROOT` 环境变量 → `third_party/onnxruntime` → 都没命中则该示例自动跳过，不影响其余部分；也可用 `-DONNXRUNTIME_ROOT=<ORT 解压根目录>` 直接指定
+- ONNX Runtime（可选，构建 `v5_onnx_inference.cu` / `v6_trt_inference.cu` 时需要）。查找顺序：`ONNXRUNTIME_ROOT` 环境变量 → `third_party/onnxruntime` → 都没命中则这两个示例自动跳过，不影响其余部分；也可用 `-DONNXRUNTIME_ROOT=<ORT 解压根目录>` 直接指定
+- TensorRT（可选，构建 `v6_trt_inference.cu` / `v7_trt_native.cu` 时需要；未命中时这两个示例自动跳过）。查找顺序：`TENSORRT_ROOT` 环境变量 → `-DTENSORRT_ROOT=<TRT 解压根目录>`。**两条路径的依赖性质不同**：v6 走 ORT 的 TRT EP，编译期完全不需要 TRT（只要运行期能加载 `nvinfer_10.dll`）；v7 直接调原生 API，`NvInfer.h` 和 `nvinfer_10.lib` 都是**编译期硬依赖**
 - 首次构建会通过 FetchContent 从 GitHub 下载 GoogleTest 与 Google Benchmark 源码（仅测试/基准需要，可分别用 `-DSIMPLEINFERQUEUE_BUILD_TESTS=OFF` / `-DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF` 关闭；CUDA 示例可用 `-DSIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES=OFF` 关闭）
 
 ### 构建
@@ -147,6 +154,10 @@ ctest --test-dir build -C Release --output-on-failure
 
 # v5 真实模型推理（还需 ONNX Runtime，详见下文「v5：接入 ONNX Runtime 的真实模型推理」）
 ./v5_onnx_inference --gpu     # 默认走 CUDA；--cpu 切换到 CPU 执行提供程序
+
+# v6/v7 走 TensorRT（详见下文「v6 / v7：接 TensorRT 的两条路」）
+./v6_trt_inference    # ONNX Runtime + TensorRT EP
+./v7_trt_native       # 裸 TensorRT API；需先用 trtexec 导出 models/*.engine
 ```
 
 ## 安装与下游使用
@@ -291,6 +302,59 @@ cmake --build build --config Release --target v5_onnx_inference
 > **CPU 和 GPU 的输出不是逐位相同的，这不是 bug。** cuDNN 会按 batch 大小选不同的卷积算法，且默认启用 TF32，尾数精度低于 FP32。实测同一张图，CPU 在 batch 1 / 32 / 64 下输出**逐位一致、完全可复现**，而 GPU 三个 batch **各不相同**。做结果校验时请按 FP32 的容差比，不要期待逐位相等。
 
 > **v5 打印的 `PASS` 只检查「任务数跑满 + 输出维度正确」，不校验数值是否算对。** 想做数值校验，可参考 `models/export_model.py` 的做法：用一组写死的正整数权重、让 ReLU 不触发，期望输出就能手算 `Wx+b`，与推理引擎独立对账——注意 v5 顶部的常量是按 MobileNet 写死的，换模型要同步改那组常量。
+
+## v6 / v7：接 TensorRT 的两条路
+
+v5 末尾的结论是「想继续榨 GPU，方向是多流，不是加线程」。v6 和 v7 是这条线上的两个分叉：
+
+- **v6**：ONNX Runtime 挂 **TensorRT EP**（`trt_fp16_enable=1`）。TRT 在运行时把子图编译成 fp16 引擎并缓存到磁盘，模型仍是 `.onnx`，切图、回退、显存管理都交给 ORT。
+- **v7**：绕开 ORT，用**裸 TensorRT API** 自己封装（`TensorRTEngine`：反序列化引擎 → 建 execution context → 自管显存和 CUDA 流）。模型是 `.engine`。
+
+### 构建与运行
+
+`.engine` 是派生产物、不入库，v7 需要先用 `trtexec` 从 `.onnx` 导出：
+
+```bash
+trtexec --onnx=models/mobilenet_batch32.onnx --fp16 \
+        --saveEngine=models/mobilenet_batch32_fp16.engine
+
+cmake --build build --config Release --target v6_trt_inference v7_trt_native
+```
+
+运行命令见前文「运行测试」一节；v7 的引擎路径由 CMake 注入，也可用 `argv[1]` 换一个。
+
+### 实测：封装零开销，差在引擎份数
+
+RTX 5060 Laptop / CUDA 13.2 / TensorRT 10.16.1.11 / MSVC Release / **两者都是 batch 32 fp16、100 任务、3 消费者**：
+
+| | 单次独占 | 100 次串行 | 三线程实际 | 相对串行 |
+| :--- | :--- | :--- | :--- | :--- |
+| v6 ORT + TRT EP（**1** 引擎 + 3 context） | 4.842 ms | 484 ms | **438 ms** | **1.11×** |
+| v7 裸 TensorRT（**3** 引擎 + 3 context） | 4.635 ms | 464 ms | **483 ms** | **0.96×** |
+
+**左两列看封装**：同一个进程里量两条路径的独占单次推理，v7 4.635 ms、ORT 4.842 ms —— 封装成本为零，run-to-run 之间符号还会翻，本来就在噪声里。
+
+**右两列看并发**：各自和「单线程老老实实跑一百遍」比，v6 是 **1.11×**，而 **v7 只有 0.96×** —— 加到三个消费者线程反而更慢。这约 10% 的差距不在封装，在**引擎的份数**：
+
+> ORT 的 TRT EP 是 **1 个引擎 + N 个 context**，而 `TensorRTEngine` 把 runtime / engine / context 捆成了一个对象，「每线程一个实例」就等于把引擎复制了三份。TensorRT 官方推荐的是 **engine 共享、context 每线程一个** —— v7 为了「零共享可变状态」把引擎也复制了，这份复制买不到吞吐，只买到干扰：三个 context 来回切、三份权重抢 L2。
+
+> **两个容易量错的地方。** 一是**别拿 v6 和 v7 互比**，各自和串行基线比才有意义。二是**别在 `infer()` 内部掐表算「重叠度」**：把三个线程各自累计的推理时间加起来除以墙钟，量出来 v6 是 2.96、v7 是 2.90，看着「并行得一样好」，但那段计时**包含等 GPU 的时间**，三个流互相拉长的部分会被算成并行产出，正好反了。
+
+### 数据流还有哪些没吃到的性能
+
+v7 每个任务的时间线是严格串行的，每一段都有硬件在空转：
+
+```
+[H2D 1.84ms] → [kernel 3.49ms] → [D2H 0.05ms] → cudaStreamSynchronize
+```
+
+| 方向 | 原理 | 理论上限 |
+| :--- | :--- | :--- |
+| **双缓冲流水** | 拷贝引擎（DMA）和计算单元（SM）是**两块独立硬件**，串行用等于各浪费一半；而流内有序、流间无序，重叠只能跨流 | `copy + compute` → `max(copy, compute)`，**快 34%** |
+| **放粗同步粒度** | 每任务一次 `cudaStreamSynchronize`，等于「用了异步 API 却立刻同步」——退化成同步 API，还白付驱动调用 | 线程在 D2H 和等待期间不再空转 |
+| **CUDA Graph** | 每任务 5 次驱动调用（`setTensorAddress`×2 + `enqueueV3` + 拷贝×2），100 任务 × 3 线程 = 300 次；录一次重放即可 | 300 次塌缩成 3 次 |
+
+后两层省的都只是 **CPU 时间**，而现在 CPU 不是瓶颈（三个线程大部分时间堵在 `cudaStreamSynchronize` 里）；双缓冲是唯一动 GPU 时序的，但 SM 已经饱和，腾出的 DMA 换不成吞吐。**真正还能加吞吐的在别处**：用 **pinned 内存**接住每任务那 18.38 MB 的 H2D（实测单次拷贝 1.838 → 0.758 ms，整次推理快 **27%**）；若上游本来就在显存里（预处理、上一个模型），直接把设备指针交给 `setTensorAddress`，这次拷贝**整个消失**。
 
 ## 模拟推理服务器运行效果
 
