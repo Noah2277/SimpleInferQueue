@@ -1,29 +1,29 @@
-#include <stdio.h>
-#include <cuda_runtime.h>
+#include "block_queue.h"
+#include "ms_queue.h"
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
+#include <stdio.h>
 #include <thread>
 #include <vector>
-#include <cmath>
-#include <chrono>
-#include "ms_queue.h"
-#include "block_queue.h"
 
 struct DeviceBufferBlock {
-    float* d_A;
-    float* d_B;
-    float* d_C;
+    float *d_A;
+    float *d_B;
+    float *d_C;
     size_t bytes;
     cudaEvent_t done_event;
 };
 
 struct InferenceTask {
     int task_id;
-    DeviceBufferBlock* block;
-    float* h_output;
+    DeviceBufferBlock *block;
+    float *h_output;
     int length;
 };
 
-__global__ void vectorAdd(const float* A, const float* B, float* C, int N) {
+__global__ void vectorAdd(const float *A, const float *B, float *C, int N) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < N) {
         C[i] = A[i] + B[i];
@@ -37,21 +37,21 @@ int main() {
     size_t bytes = LENGTH * sizeof(float);
 
     // 队列
-    BlockQueue<DeviceBufferBlock*> free_queue(POOL_SIZE);
+    BlockQueue<DeviceBufferBlock *> free_queue(POOL_SIZE);
     MSQueue<InferenceTask> task_queue;
     BlockQueue<InferenceTask> done_queue(POOL_SIZE);
 
     std::atomic<bool> producer_done(false);
 
     // 主机结果数组
-    std::vector<float*> host_results(NUM_TASKS);
+    std::vector<float *> host_results(NUM_TASKS);
     for (int i = 0; i < NUM_TASKS; ++i) {
         host_results[i] = new float[LENGTH];
     }
 
     // 预分配缓冲区块池
     for (int i = 0; i < POOL_SIZE; ++i) {
-        DeviceBufferBlock* block = new DeviceBufferBlock;
+        DeviceBufferBlock *block = new DeviceBufferBlock;
         block->bytes = bytes;
         cudaMalloc(&block->d_A, bytes);
         cudaMalloc(&block->d_B, bytes);
@@ -60,16 +60,17 @@ int main() {
         free_queue.Push(block);
     }
 
-    //开始计时
+    // 开始计时
     auto start = std::chrono::high_resolution_clock::now();
 
     // 生产者
     std::thread producer([&]() {
         for (int task_id = 0; task_id < NUM_TASKS; ++task_id) {
-            DeviceBufferBlock* block = free_queue.Pop();
+            DeviceBufferBlock *block = nullptr;
+            free_queue.Pop(block); // 阻塞直到池中有空闲块
 
-            float* h_A = new float[LENGTH];
-            float* h_B = new float[LENGTH];
+            float *h_A = new float[LENGTH];
+            float *h_B = new float[LENGTH];
             for (int i = 0; i < LENGTH; ++i) {
                 h_A[i] = task_id * 1.0f;
                 h_B[i] = task_id * 2.0f;
@@ -101,11 +102,10 @@ int main() {
                 int threadsPerBlock = 256;
                 int blocksPerGrid = (task.length + threadsPerBlock - 1) / threadsPerBlock;
 
-                vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(
-                    task.block->d_A, task.block->d_B, task.block->d_C, task.length);
+                vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(task.block->d_A, task.block->d_B,
+                                                              task.block->d_C, task.length);
 
-                cudaMemcpyAsync(task.h_output, task.block->d_C, bytes,
-                                cudaMemcpyDeviceToHost);
+                cudaMemcpyAsync(task.h_output, task.block->d_C, bytes, cudaMemcpyDeviceToHost);
 
                 cudaDeviceSynchronize();
 
@@ -125,7 +125,8 @@ int main() {
     std::thread recycler([&]() {
         int recycled = 0;
         while (recycled < NUM_TASKS) {
-            InferenceTask task = done_queue.Pop();
+            InferenceTask task;
+            done_queue.Pop(task); // 阻塞等待处理完成的任务
             cudaEventSynchronize(task.block->done_event);
             free_queue.Push(task.block);
             recycled++;
@@ -143,12 +144,13 @@ int main() {
         for (int i = 0; i < LENGTH; ++i) {
             if (fabs(host_results[task_id][i] - expected) > 1e-5) {
                 success = false;
-                printf("Mismatch at task %d, index %d: got %f, expected %f\n",
-                       task_id, i, host_results[task_id][i], expected);
+                printf("Mismatch at task %d, index %d: got %f, expected %f\n", task_id, i,
+                       host_results[task_id][i], expected);
                 break;
             }
         }
-        if (!success) break;
+        if (!success)
+            break;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -157,17 +159,16 @@ int main() {
     printf("Time: %.2f ms\n", ms);
     printf("Throughput: %.2f tasks/s\n", NUM_TASKS * 1000.0 / ms);
 
-
-    
     // 清理
-    for (int i = 0; i < NUM_TASKS; ++i) delete[] host_results[i];
+    for (int i = 0; i < NUM_TASKS; ++i)
+        delete[] host_results[i];
 
     // 块在每次任务完成后都会 Push 回 free_queue（见消费者末尾的 free_queue.Push(task.block)），
     // 所以这里从队列里逐个取回来释放。用 try_Pop 而不是 Pop：
     // Pop() 是阻塞的，万一上面提前 break 有块没回来，阻塞版会永久挂住；
     // 非阻塞版宁可漏释放也不死等
     int freed = 0;
-    DeviceBufferBlock* block = nullptr;
+    DeviceBufferBlock *block = nullptr;
     while (free_queue.try_Pop(block)) {
         cudaFree(block->d_A);
         cudaFree(block->d_B);

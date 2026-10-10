@@ -2,16 +2,16 @@
 
 ![CI](https://github.com/Noah2277/SimpleInferQueue/actions/workflows/ci.yml/badge.svg)
 
-一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务演示、4 个逐步演进的 CUDA GPU 流水线示例，以及一个接入 ONNX Runtime 跑真实模型（MobileNetV2）的推理示例。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
+一个从零构建的 C++ 高性能线程安全任务队列，面向 AI 推理场景设计。支持互斥锁与无锁（Lock-Free）两种并发模型，涵盖环形缓冲区、阻塞队列、Michael-Scott 无锁队列等核心组件，并附带模拟推理服务演示，以及 7 个逐步演进的推理流水线示例（4 个 CUDA 基础版本 → ONNX Runtime 真实模型 → TensorRT 两条路径）。运行时仅依赖 C++17 标准库；测试使用 GoogleTest（构建时通过 FetchContent 自动拉取）。
 
 ## 项目特性
 
-- **两种并发模型**：互斥锁 + 条件变量，与 CAS 无锁队列，适配不同场景
+- **两种并发模型**：互斥锁 + 条件变量（`BlockQueue`），与无锁队列（`LockFreeQueue` / `MSQueue`），适配不同场景
 - **Michael-Scott 无锁队列**：MPMC（多生产者-多消费者），链表 + 哑节点设计
-- **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 自动验证
+- **完整测试与基准**：GoogleTest 单元测试 + Google Benchmark 性能基准；CI 三平台（Linux / Windows / macOS）+ ThreadSanitizer 数据竞争检测 + clang-format 全树自动验证 + `find_package` 下游消费回归
 - **GPU 流水线示例**：4 个 CUDA 演进版本（同步基线 → 缓冲池 → 多流 → 双向流水线），附本机实测性能对照
 - **真实模型推理**：v5 把模拟负载换成 ONNX Runtime + MobileNetV2，可切换 CPU / CUDA 执行提供程序、对比不同 batch，附实测数据与取舍分析
-- **TensorRT 两条路径**：v6 走 ONNX Runtime + TensorRT EP，v7 用裸 TensorRT API 自行封装，附「封装零开销」的对照测量与数据流分析
+- **TensorRT 两条路径**：v6 走 ONNX Runtime + TensorRT EP，v7 用裸 TensorRT API 自行封装（引擎共享 + 每线程 Session），附「封装零开销」的对照测量与数据流分析
 - **教学友好**：核心算法均配步骤注释，适合学习并发编程与无锁编程
 - **工程规范**：clang-format 统一代码风格，install 规则支持 `find_package` 下游消费
 - **开源协议**：MIT License，可自由使用、修改与分发
@@ -37,9 +37,9 @@ q.Dequeue(v);  // v == 42
 | 组件 | 线程模型 | 生产者 | 消费者 | 阻塞 | 容量 | 说明 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `RingBuffer` | 非线程安全 | - | - | 否 | 固定 | 基础环形缓冲区，多线程下需自行加锁 |
-| `BlockQueue` | 互斥锁 + 条件变量 | 多 | 多 | `Push`/`Pop` 阻塞，`try_*` 非阻塞 | 固定 | 通用阻塞队列，适合生产者-消费者 |
-| `LockFreeQueue` | CAS 无锁 | **单** | **单** | 否 | 固定 | **仅 SPSC 安全**，多生产者/多消费者请用 `MSQueue` |
-| `MSQueue` | Michael-Scott 无锁 | 多 | 多 | 否 | 无界 | MPMC；出队节点暂不释放内存（见下文设计要点） |
+| `BlockQueue` | 互斥锁 + 条件变量 | 多 | 多 | `Push`/`Pop` 阻塞，`try_*` 非阻塞 | 固定 | 通用阻塞队列；`Close()` 可唤醒所有阻塞线程，`Pop` 返回 `false` 即「已关闭且已取空」 |
+| `LockFreeQueue` | 原子 load/store 无锁 | **单** | **单** | 否 | 固定 | **仅 SPSC 安全**；环形缓冲 + acquire-release 内存序，**不含 CAS**。多生产者/多消费者请用 `MSQueue` |
+| `MSQueue` | Michael-Scott 无锁（CAS） | 多 | 多 | 否 | 无界 | MPMC；**内存随处理量单调增长**，不适合长时间运行的服务（见下文设计要点） |
 
 ## 项目结构
 
@@ -48,9 +48,9 @@ SimpleInferQueue/
 ├── include/
 │   ├── ring_buffer.h                    # 环形缓冲区（非线程安全）
 │   ├── block_queue.h                    # 互斥锁阻塞队列
-│   ├── lockfree_queue.h                 # CAS无锁队列（原子操作+内存序）
-│   ├── ms_queue.h                       # Michael-Scott 无锁队列（MPMC，链表+哑节点）
-│   └── tensorrt_engine.h                # TensorRT 引擎封装（可选构建，v7 使用）
+│   ├── lockfree_queue.h                 # SPSC 无锁环形队列（原子 load/store + acquire-release，无 CAS）
+│   ├── ms_queue.h                       # Michael-Scott 无锁队列（MPMC，链表+哑节点，CAS）
+│   └── tensorrt_engine.h                # TensorRT 封装：TensorRTEngine（引擎，可共享）+ TensorRTSession（每线程，可选构建，v7 使用）
 ├── src/
 │   └── tensorrt_engine.cpp              # 上述封装的实现（可选构建）
 ├── benchmarks/
@@ -91,16 +91,16 @@ SimpleInferQueue/
 
 - **环形缓冲区**: 预分配内存，减少动态分配，提升缓存局部性。
 - **互斥锁与条件变量**: `std::mutex` + `std::condition_variable` 实现线程安全的阻塞队列。
-- **无锁编程**: 基于 `std::atomic`、CAS、Acquire-Release 内存序，实现生产者-消费者无锁队列。
+- **无锁编程**: 基于 `std::atomic` 与 Acquire-Release 内存序实现生产者-消费者无锁队列。两条路子不同——`LockFreeQueue` 是 SPSC 环，靠原子 load/store 就够，**一次 CAS 都不用**；`MSQueue` 是 MPMC 链表，才是真正的 CAS 主场。
 - **Michael-Scott 无锁队列**: 链表 + 哑节点 + head/tail 双原子指针，CAS + Acquire-Release 内存序实现 MPMC 入队/出队，"互助推进"机制保证无锁下的高效协作。
-- **优雅退出**: 通过原子标志位实现生产者和消费者的协调关闭。
+- **优雅退出**: `BlockQueue::Close()` 唤醒所有阻塞中的线程，`Pop` 返回 `false` 表示「已关闭且已取空」——消费者不必靠「固定循环 N 次」或原子标志位猜时机。
 
 ## MSQueue 设计要点
 
 - **哑节点**: 队列始终保留一个不含数据的占位节点，head 指向它——"空队列"被化简成普通状态，入队/出队永远不需要处理空指针
 - **入队两步走**: 先 CAS 把新节点挂到 `tail->next`（真正入队），再尝试推进 `tail`；推进失败没关系，其他线程会"互助推进"
 - **出队**: CAS 推进 `head`，成功者取走值；当 `head == tail` 但队列非空时，先帮忙推进 `tail` 以维持"tail 不落后于 head"的不变量
-- **内存回收**: 当前版本不释放被出队的节点（规避无锁内存回收难题），析构函数仅回收仍在队列中的节点
+- **内存回收**: 当前版本不释放被出队的节点（规避无锁内存回收难题），析构函数仅回收仍在队列中的节点。**代价要说清楚：内存随处理量单调增长，与队列当前长度无关**——跑 100 万个任务就欠下 100 万个节点，即使队列早已空了。真要解决得上 hazard pointer / epoch-based reclamation 或换有界 MPMC 环（Vyukov），因此**本组件不适合长时间运行的服务**
 
 ## 构建与运行
 
@@ -156,8 +156,9 @@ ctest --test-dir build -C Release --output-on-failure
 ./v5_onnx_inference --gpu     # 默认走 CUDA；--cpu 切换到 CPU 执行提供程序
 
 # v6/v7 走 TensorRT（详见下文「v6 / v7：接 TensorRT 的两条路」）
-./v6_trt_inference    # ONNX Runtime + TensorRT EP
-./v7_trt_native       # 裸 TensorRT API；需先用 trtexec 导出 models/*.engine
+./v6_trt_inference --gpu --consumers=3   # ONNX Runtime + TensorRT EP；--consumers 可改消费者线程数
+./v7_trt_native "" 3                     # 裸 TensorRT API；argv[1]=引擎路径（空串用默认），argv[2]=消费者线程数
+                                         # 需先用 trtexec 导出 models/*.engine
 ```
 
 ## 安装与下游使用
@@ -176,19 +177,40 @@ target_link_libraries(my_app PRIVATE SimpleInferQueue::SimpleInferQueue)
 
 头文件直接 `#include "ms_queue.h"` 等即可使用。
 
+**这条链路有 CI 守着**：`tests/consumer/` 是一个独立的最小下游工程，CI 的 `install-consumer`
+job 会先把库装到临时 prefix，再用它 `find_package` 回来、编译、并真的跑一遍。本地手动复现：
+
+```bash
+cmake -S SimpleInferQueue -B build-install -DCMAKE_INSTALL_PREFIX=/tmp/siq-prefix
+cmake --build build-install && cmake --install build-install
+
+cmake -S SimpleInferQueue/tests/consumer -B build-consumer \
+  -DCMAKE_PREFIX_PATH=/tmp/siq-prefix
+cmake --build build-consumer && ./build-consumer/siq_consumer   # 应输出 consumer ok: 42
+```
+
+> **为什么值得专门为它加一个 job**：包导出坏掉（比如 `INTERFACE_INCLUDE_DIRECTORIES` 被
+> 静默丢弃）这种问题，**库自己构建得再好也照样全绿**——只有真的「装一遍、再消费一遍」才会
+> 暴露。这个 bug 在本仓库里活了很久，根因就是当时没有任何自动化测试覆盖这条链路。
+
 ## 代码格式
 
-项目使用 clang-format（基于 LLVM 风格，4 空格缩进），配置见仓库根目录 `.clang-format`。CI 会检查格式，违规会导致构建失败：
+项目使用 clang-format（基于 LLVM 风格，4 空格缩进），配置见仓库根目录 `.clang-format`。CI 会检查格式，违规会导致构建失败。
+
+**CI 扫描整个源码树**：`include/` / `src/` / `examples/` / `tests/` / `benchmarks/` 下的 `*.h`、`*.cpp`、`*.cu` 全在内。`src/` 与 `*.cu` 曾经是盲区——`src/tensorrt_engine.cpp` 当初有 108 处违规却一直没人发现，只因 `find` 没扫它，所以现在一并纳入。
 
 ```bash
 # 格式化全部源码（版本需与 CI 一致：18.1.8）
-clang-format -i SimpleInferQueue/include/*.h SimpleInferQueue/examples/*.cpp SimpleInferQueue/tests/*.cpp SimpleInferQueue/benchmarks/*.cpp
+find SimpleInferQueue/include SimpleInferQueue/src SimpleInferQueue/examples \
+     SimpleInferQueue/tests SimpleInferQueue/benchmarks \
+     \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' \) \
+  | xargs clang-format -i
 
 # 本地检查是否合规
 clang-format --dry-run --Werror <file>
 ```
 
-> `examples/cuda_pipeline/` 下的 `.cu` 文件不在检查范围内（CUDA 代码排版风格独立），CI 的格式检查同样只扫描 `.h` / `.cpp`。
+> **注意 `tests/consumer/main.cpp` 是纯 ASCII 的**，与仓库其余部分不同——这是有意的，原因见该目录的 `CMakeLists.txt`：下游工程必须能用默认编译设置消费本库，不能要求它也加 `/utf-8`。
 
 ## 性能基准
 
@@ -203,16 +225,18 @@ clang-format --dry-run --Werror <file>
 
 > **CI 只编译基准、不运行**：共享 runner 上计时噪音大，跑出来的数字没有参考价值。CI 保证基准代码「能编译、不腐烂」，真实数据请在本机测量。
 
-本机测试结果（Windows / MSVC Release / 24 核，队列容量 4096）：
+本机测试结果（Windows / MSVC Release / 24 核，队列容量 4096）。**每种配置取 12~16 组样本的中位数**——单次运行的热漂移能到 5%，只跑一次不足以支撑后面那些结论：
 
 | 实现 | 场景 | 单操作耗时 | 吞吐量 |
 | :--- | :--- | :--- | :--- |
-| BlockQueue（互斥锁） | 1P×1C | **39.0** ns | **2564万** ops/s |
-| LockFreeQueue（无锁） | 1P×1C | **20.1** ns | **4975万** ops/s |
-| MSQueue（Michael-Scott 无锁） | 4P×4C | **856** ns | **117万** ops/s |
+| BlockQueue（互斥锁） | 1P×1C | **46.0** ns | **2176万** ops/s |
+| LockFreeQueue（无锁） | 1P×1C | **19.5** ns | **5141万** ops/s |
+| MSQueue（Michael-Scott 无锁） | 4P×4C | **740** ns | **135万** ops/s |
 
-- SPSC 场景：无锁队列吞吐约为有锁队列的 **1.94 倍**
+- SPSC 场景：无锁队列吞吐约为有锁队列的 **2.36 倍**
 - MSQueue 单操作开销远高于 SPSC——**8 个线程竞争同一队列时 CAS 反复失败重试，这正是「无锁不等于免费」**：锁的开销换成了缓存行乒乓与 CAS 竞争开销，且出队节点暂不回收、内存持续占用
+- **`BlockQueue` 比上一版慢了约 16%，这是为「支持 move-only 类型 + close 语义」付的账**。四个容器都改成用 `std::optional<T>` 槽位，`Pop` 变成「移动出来 + `reset()` 槽位」，`try_Push`/`try_Pop` 的谓词里还多一个 `closed_` 判断。这份簿记开销**与 `sizeof(T)` 无关**，而本基准的 `T` 就是 `int`，所以占比最大。分开量过（同一台机器、先 stash 回旧实现再测）：`BlockQueue` 39.8 → 46.0 ns，两组样本区间 **37.9~42.1 对 45.0~47.6 完全不重叠，是真回归**；`LockFreeQueue` 与 `MSQueue` 的区间大幅重叠，**看不出确定变化**。换成真实任务类型（`vector`、结构体）时这份固定开销的占比会小得多。
+- 上面三行是**重新测过**的：容器内部改完，旧数字就作废了——顺带说明基准表为什么必须标明测量时间，否则读者无从判断它对应哪一版代码。
 
 ## CUDA 流水线示例：从同步到双向流水线
 
@@ -308,7 +332,7 @@ cmake --build build --config Release --target v5_onnx_inference
 v5 末尾的结论是「想继续榨 GPU，方向是多流，不是加线程」。v6 和 v7 是这条线上的两个分叉：
 
 - **v6**：ONNX Runtime 挂 **TensorRT EP**（`trt_fp16_enable=1`）。TRT 在运行时把子图编译成 fp16 引擎并缓存到磁盘，模型仍是 `.onnx`，切图、回退、显存管理都交给 ORT。
-- **v7**：绕开 ORT，用**裸 TensorRT API** 自己封装（`TensorRTEngine`：反序列化引擎 → 建 execution context → 自管显存和 CUDA 流）。模型是 `.engine`。
+- **v7**：绕开 ORT，用**裸 TensorRT API** 自己封装。模型是 `.engine`，封装分两层：`TensorRTEngine` 持有 runtime + engine，**反序列化一次、所有线程共享**；`TensorRTSession` 持有 execution context + 显存 + CUDA 流，**每线程一个**——这正是 TensorRT 官方推荐的用法（`IExecutionContext` 不是线程安全的）。
 
 ### 构建与运行
 
@@ -321,40 +345,56 @@ trtexec --onnx=models/mobilenet_batch32.onnx --fp16 \
 cmake --build build --config Release --target v6_trt_inference v7_trt_native
 ```
 
-运行命令见前文「运行测试」一节；v7 的引擎路径由 CMake 注入，也可用 `argv[1]` 换一个。
+运行命令见前文「运行测试」一节。**两个示例的消费者线程数都能从命令行改**，这是量「加线程有没有换来吞吐」的正确姿势——同一份二进制，只改线程数：
 
-### 实测：封装零开销，差在引擎份数
+```bash
+./v7_trt_native "" 3          # argv[1]=引擎路径（空串=用 CMake 注入的默认值），argv[2]=消费者线程数
+./v6_trt_inference --gpu --consumers=1
+```
 
-RTX 5060 Laptop / CUDA 13.2 / TensorRT 10.16.1.11 / MSVC Release / **两者都是 batch 32 fp16、100 任务、3 消费者**：
+### 实测：封装零开销，但加线程只有 v6 受益
 
-| | 单次独占 | 100 次串行 | 三线程实际 | 相对串行 |
+RTX 5060 Laptop / CUDA 13.2 / TensorRT 10.16.1.11 / MSVC Release / **两者都是 batch 32 fp16、100 个任务**。每格是 5~9 组样本的中位数；**同行三列来自同一份二进制、同一套开销，只有线程数不同**——这样才排除掉「拿本程序的多线程墙钟去比别处的串行基线」这种量法：
+
+| | 单次推理 | 1 消费者 | 3 消费者 | 3 / 1 |
 | :--- | :--- | :--- | :--- | :--- |
-| v6 ORT + TRT EP（**1** 引擎 + 3 context） | 4.842 ms | 484 ms | **438 ms** | **1.11×** |
-| v7 裸 TensorRT（**3** 引擎 + 3 context） | 4.635 ms | 464 ms | **483 ms** | **0.96×** |
+| v6 ORT + TRT EP | 4.62 ms | 461.6 ms | **425.7 ms** | **1.08×** |
+| v7 裸 TensorRT | 4.52 ms | 451.6 ms | 462.3 ms | 0.98× |
 
-**左两列看封装**：同一个进程里量两条路径的独占单次推理，v7 4.635 ms、ORT 4.842 ms —— 封装成本为零，run-to-run 之间符号还会翻，本来就在噪声里。
+**看「单次推理」列**：v7 4.52 ms 对 v6 4.62 ms —— 自己封装的 `TensorRTEngine` + `TensorRTSession` 没引入额外开销，run-to-run 之间符号还会翻，本来就在噪声里。
 
-**右两列看并发**：各自和「单线程老老实实跑一百遍」比，v6 是 **1.11×**，而 **v7 只有 0.96×** —— 加到三个消费者线程反而更慢。这约 10% 的差距不在封装，在**引擎的份数**：
+**看右三列**：v6 加到三个线程快 8%（两组样本区间完全不重叠：453~470 ms 对 412~429 ms，是实打实的收益）；**v7 加了等于白加**（451.6 → 462.3 ms，两组样本区间大幅重叠，差异在噪声内）。
 
-> ORT 的 TRT EP 是 **1 个引擎 + N 个 context**，而 `TensorRTEngine` 把 runtime / engine / context 捆成了一个对象，「每线程一个实例」就等于把引擎复制了三份。TensorRT 官方推荐的是 **engine 共享、context 每线程一个** —— v7 为了「零共享可变状态」把引擎也复制了，这份复制买不到吞吐，只买到干扰：三个 context 来回切、三份权重抢 L2。
+> **这个结论推翻了本项目早先的一个说法。** 上一版 README 把 v7 的并发劣势归因于「`TensorRTEngine` 把 runtime / engine / context 捆成一个对象，每线程一个实例等于把引擎复制了三份」——**这个归因是错的**。v7 已按 TensorRT 官方推荐的「engine 共享、context 每线程一个」重构（`TensorRTEngine` 反序列化一次全局共享，`TensorRTSession` 每线程一个），引擎份数从 3 降到 1，**并发表现没有任何变化**。归因错在哪，见下面两段。
 
-> **两个容易量错的地方。** 一是**别拿 v6 和 v7 互比**，各自和串行基线比才有意义。二是**别在 `infer()` 内部掐表算「重叠度」**：把三个线程各自累计的推理时间加起来除以墙钟，量出来 v6 是 2.96、v7 是 2.90，看着「并行得一样好」，但那段计时**包含等 GPU 的时间**，三个流互相拉长的部分会被算成并行产出，正好反了。
+**真正的差别目前没有定论。** 单线程时两者几乎同速（4.52 / 4.62 ms），说明瓶颈是同一块 GPU，差别只出现在并发调度上。至少有两个候选原因，本项目的实验**分不开它们**：
+
+1. **两者跑的根本不是同一份引擎**。v6 的引擎由 ORT 的 TRT EP 在运行时编译，v7 的是 `trtexec --fp16` 提前导出——tactic 选择、kernel 实现都可能不同，8% 完全可能是引擎质量差而非调度差。
+2. **两者的并发模型不同**。v6 三线程共用一个 `Ort::Session`，context 池由 ORT 内部管；v7 三个 Session 各自持有独立的 context、显存和 CUDA 流，三条流一起往同一批已经吃满的 SM 上灌。
+
+要分开这两者，需要一个让两条路径加载**同一个 `.engine` 文件**的对照实验——v7 能指定引擎路径，v6 不能（它必须从 `.onnx` 现场编译）。**所以这里只报事实，不报机制。**
+
+> **两个容易量错的地方。** 一是**别拿 v6 和 v7 互比**，各自和串行基线比才有意义。二是**别在 `infer()` 内部掐表算「重叠度」**：把三个线程各自累计的推理时间加起来除以墙钟，v7 三线程量出来是 **2.9**（各线程累计 441/442/443 ms，墙钟 456 ms），看着「并行得挺好」——但那段计时**包含等 GPU 的时间**。同一组数据换个读法就露馅了：三个线程各只做了 1/3 的任务，单任务耗时却从 4.54 ms 涨到 **12.6 ms**（约 2.8×）。每个任务都在排队等另外两个，GPU 是**串着**处理它们的，那个 2.9 倍的比值正是「三个线程分同一条时间线」的算术后果，不是并行产出。
 
 ### 数据流还有哪些没吃到的性能
 
 v7 每个任务的时间线是严格串行的，每一段都有硬件在空转：
 
 ```
-[H2D 1.84ms] → [kernel 3.49ms] → [D2H 0.05ms] → cudaStreamSynchronize
+[H2D 1.35ms] → [kernel ~3.1ms] → [D2H 0.04ms] → cudaStreamSynchronize
 ```
+
+H2D / D2H 是单独用一段只做拷贝的 CUDA 程序量出来的（18.38 MB，100 次取平均）；kernel 那一段是 `infer()` 单次总耗时 4.52 ms 减去两个拷贝后的余量——**注意它同时包含了 kernel 和驱动调用、显存访问的竞争，不是纯粹的 GPU 计算时间**。
 
 | 方向 | 原理 | 理论上限 |
 | :--- | :--- | :--- |
-| **双缓冲流水** | 拷贝引擎（DMA）和计算单元（SM）是**两块独立硬件**，串行用等于各浪费一半；而流内有序、流间无序，重叠只能跨流 | `copy + compute` → `max(copy, compute)`，**快 34%** |
+| **双缓冲流水** | 拷贝引擎（DMA）和计算单元（SM）是**两块独立硬件**，串行用等于各浪费一半；而流内有序、流间无序，重叠只能跨流 | `1.35 + 3.1` → `max(1.35, 3.1)`，**快约 30%** |
 | **放粗同步粒度** | 每任务一次 `cudaStreamSynchronize`，等于「用了异步 API 却立刻同步」——退化成同步 API，还白付驱动调用 | 线程在 D2H 和等待期间不再空转 |
-| **CUDA Graph** | 每任务 5 次驱动调用（`setTensorAddress`×2 + `enqueueV3` + 拷贝×2），100 任务 × 3 线程 = 300 次；录一次重放即可 | 300 次塌缩成 3 次 |
+| **CUDA Graph** | 每任务 4 次驱动调用（`enqueueV3` + 拷贝×2 + `cudaStreamSynchronize`；`setTensorAddress`×2 已经挪到 Session 构造里，每 Session 只调一次，不在关键路径上），100 任务 × 3 线程 = 1200 次；录一次重放即可 | 上千次塌缩成「每 Session 一次」 |
 
-后两层省的都只是 **CPU 时间**，而现在 CPU 不是瓶颈（三个线程大部分时间堵在 `cudaStreamSynchronize` 里）；双缓冲是唯一动 GPU 时序的，但 SM 已经饱和，腾出的 DMA 换不成吞吐。**真正还能加吞吐的在别处**：用 **pinned 内存**接住每任务那 18.38 MB 的 H2D（实测单次拷贝 1.838 → 0.758 ms，整次推理快 **27%**）；若上游本来就在显存里（预处理、上一个模型），直接把设备指针交给 `setTensorAddress`，这次拷贝**整个消失**。
+后两层省的都只是 **CPU 时间**，而现在 CPU 不是瓶颈（线程大部分时间堵在 `cudaStreamSynchronize` 里）；双缓冲是唯一动 GPU 时序的，但 SM 已经饱和，腾出的 DMA 换不成吞吐——**上一节的实测正是这句话的证据**：三条流都没能换来吞吐，再加一条只会更难。
+
+**真正还能加吞吐的在别处**：用 **pinned 内存**接住每任务那 18.38 MB 的 H2D（实测单次拷贝 **1.35 → 0.72 ms**，省 0.63 ms，按单次推理 4.52 ms 算整次快 **约 17%**）；若上游本来就在显存里（预处理、上一个模型），直接把设备指针交给 `setTensorAddress`，这次拷贝**整个消失**——那才是把 1.35 ms 从关键路径上彻底拿掉。
 
 ## 模拟推理服务器运行效果
 

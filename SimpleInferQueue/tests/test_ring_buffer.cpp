@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <memory>
+
 #include "ring_buffer.h"
 
 // 基础 FIFO：先入先出，元素顺序不变
@@ -72,4 +74,46 @@ TEST(RingBufferTest, WrapAround) {
         ASSERT_TRUE(buf.Pop(v));
         EXPECT_EQ(v, expected);
     }
+}
+
+// move-only 类型（不可拷贝、不可默认构造）也能装
+// 槽位是 std::optional<T>，空槽不构造 T，因此不再要求 T 可默认构造
+TEST(RingBufferTest, SupportsMoveOnlyPayload) {
+    RingBuffer<std::unique_ptr<int>> buf(2);
+
+    EXPECT_TRUE(buf.Push(std::make_unique<int>(1)));
+    EXPECT_TRUE(buf.Push(std::make_unique<int>(2)));
+    EXPECT_FALSE(buf.Push(std::make_unique<int>(3))); // 已满
+
+    std::unique_ptr<int> out;
+    ASSERT_TRUE(buf.Pop(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 1);
+
+    ASSERT_TRUE(buf.Pop(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 2);
+
+    EXPECT_FALSE(buf.Pop(out)); // 已空
+}
+
+// 空槽在 Pop 之后必须被真正重置，而不是留一份副本在里面
+// （槽位复用若忘了 reset，取走的对象的生命周期会被队列莫名延长）
+TEST(RingBufferTest, SlotReleasedAfterPop) {
+    RingBuffer<std::shared_ptr<int>> buf(2);
+    std::weak_ptr<int> weak;
+
+    auto owner = std::make_shared<int>(42);
+    weak = owner;
+    ASSERT_TRUE(buf.Push(std::move(owner)));
+    EXPECT_FALSE(weak.expired()); // 队列持有一份
+
+    std::shared_ptr<int> out;
+    ASSERT_TRUE(buf.Pop(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 42);
+
+    out.reset();
+    // 槽位若没被 reset，队列里还留着一份 shared_ptr，weak 就不会过期
+    EXPECT_TRUE(weak.expired());
 }

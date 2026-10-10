@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -79,4 +80,24 @@ TEST(MSQueueTest, MultiProducerMultiConsumer) {
     for (int i = 0; i < kTotal; ++i) {
         EXPECT_NE(consumed_values.find(i), consumed_values.end());
     }
+}
+
+// move-only 类型（不可拷贝、不可默认构造）也能装
+// 哑节点现在用空 optional 构造，不再需要 T{}
+TEST(MSQueueTest, SupportsMoveOnlyPayload) {
+    MSQueue<std::unique_ptr<int>> q;
+    q.Enqueue(std::make_unique<int>(1));
+    q.Enqueue(std::make_unique<int>(2));
+
+    std::unique_ptr<int> out;
+    ASSERT_TRUE(q.Dequeue(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 1);
+
+    ASSERT_TRUE(q.Dequeue(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 2);
+
+    EXPECT_TRUE(q.Empty());
+    EXPECT_FALSE(q.Dequeue(out)); // 队列已空
 }

@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
 project(SimpleInferQueue VERSION 1.0.0 LANGUAGES CXX)
 
+# GNUInstallDirs 必须在这里就 include，不能拖到文件末尾的「安装与包导出」一节。
+# 原因：下面 target_include_directories 里的 $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+# 中 ${} 是「配置期」展开、$<> 才是「生成期」求值——GNUInstallDirs 若在后面才 include，
+# 这一行拿到的就是空串，导出目标的 INTERFACE_INCLUDE_DIRECTORIES 会整个消失，
+# 下游 find_package 后编译报「找不到 ms_queue.h」。头文件其实装对了位置，只有导出属性坏掉，
+# 所以这个 bug 不会在 cmake --install 时报错，只在下游消费时才炸。
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -446,9 +454,13 @@ if(SIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES)
 endif()
 
 # ============ 安装与包导出 ============
-include(GNUInstallDirs)
+# GNUInstallDirs 已在文件开头 include（那里的注释解释了为什么不能放在这里）
 
-install(TARGETS SimpleInferQueue EXPORT SimpleInferQueueTargets)
+# INCLUDES DESTINATION 与上面的 $<INSTALL_INTERFACE:...> 是同一件事的第二道保险：
+# 前者直接往导出目标的 INTERFACE_INCLUDE_DIRECTORIES 里追加 <prefix>/include，
+# 不依赖生成器表达式求值。两者都写，任何一个单独失效都不会再让下游找不到头
+install(TARGETS SimpleInferQueue EXPORT SimpleInferQueueTargets
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT SimpleInferQueueTargets
     FILE SimpleInferQueueTargets.cmake

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <memory>
 #include <thread>
 
 #include "lockfree_queue.h"
@@ -61,4 +62,24 @@ TEST(LockFreeQueueTest, SingleProducerSingleConsumerFifo) {
     consumer.join();
 
     EXPECT_EQ(error_count.load(), 0);
+}
+
+// move-only 类型（不可拷贝、不可默认构造）也能装
+TEST(LockFreeQueueTest, SupportsMoveOnlyPayload) {
+    LockFreeQueue<std::unique_ptr<int>> queue(2);
+
+    EXPECT_TRUE(queue.Enqueue(std::make_unique<int>(1)));
+    EXPECT_TRUE(queue.Enqueue(std::make_unique<int>(2)));
+    EXPECT_FALSE(queue.Enqueue(std::make_unique<int>(3))); // 已满
+
+    std::unique_ptr<int> out;
+    ASSERT_TRUE(queue.Dequeue(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 1);
+
+    ASSERT_TRUE(queue.Dequeue(out));
+    ASSERT_NE(out, nullptr);
+    EXPECT_EQ(*out, 2);
+
+    EXPECT_FALSE(queue.Dequeue(out)); // 已空
 }

@@ -1,24 +1,24 @@
-#include <stdio.h>
-#include <cuda_runtime.h>
+#include "ms_queue.h"
 #include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cuda_runtime.h>
+#include <stdio.h>
 #include <thread>
 #include <vector>
-#include <cmath>
-#include <chrono>
-#include "ms_queue.h"
 
 // 任务结构体
 struct InferenceTask {
     int task_id;
-    float* d_inputA;
-    float* d_inputB;
-    float* d_output;
-    float* h_output;   // 主机结果缓冲区
+    float *d_inputA;
+    float *d_inputB;
+    float *d_output;
+    float *h_output; // 主机结果缓冲区
     int length;
 };
 
 // CUDA 核函数：向量加法
-__global__ void vectorAdd(const float* A, const float* B, float* C, int N) {
+__global__ void vectorAdd(const float *A, const float *B, float *C, int N) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < N) {
         C[i] = A[i] + B[i];
@@ -27,7 +27,7 @@ __global__ void vectorAdd(const float* A, const float* B, float* C, int N) {
 
 int main() {
     constexpr int NUM_TASKS = 100;
-    constexpr int LENGTH = 1 << 16;  // 65536
+    constexpr int LENGTH = 1 << 16; // 65536
     size_t bytes = LENGTH * sizeof(float);
 
     // 队列
@@ -35,23 +35,23 @@ int main() {
     std::atomic<bool> producer_done(false);
 
     // 预分配主机结果数组
-    std::vector<float*> host_results(NUM_TASKS);
+    std::vector<float *> host_results(NUM_TASKS);
     for (int i = 0; i < NUM_TASKS; ++i) {
         host_results[i] = new float[LENGTH];
     }
 
     // 用于收集所有设备缓冲区指针，最后统一释放
-    std::vector<float*> device_ptrs;  // 只有生产者添加，主线程最后释放
+    std::vector<float *> device_ptrs; // 只有生产者添加，主线程最后释放
 
-    //计时开始
+    // 计时开始
     auto start = std::chrono::high_resolution_clock::now();
 
     // 生产者线程
     std::thread producer([&]() {
         for (int task_id = 0; task_id < NUM_TASKS; ++task_id) {
             // 主机准备数据
-            float* h_A = new float[LENGTH];
-            float* h_B = new float[LENGTH];
+            float *h_A = new float[LENGTH];
+            float *h_B = new float[LENGTH];
             for (int i = 0; i < LENGTH; ++i) {
                 h_A[i] = task_id * 1.0f;
                 h_B[i] = task_id * 2.0f;
@@ -99,13 +99,12 @@ int main() {
                 int blocksPerGrid = (task.length + threadsPerBlock - 1) / threadsPerBlock;
 
                 // 在默认流上启动核函数
-                vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(
-                    task.d_inputA, task.d_inputB, task.d_output, task.length);
+                vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(task.d_inputA, task.d_inputB,
+                                                              task.d_output, task.length);
 
                 // 异步拷贝结果到主机
-                cudaMemcpyAsync(task.h_output, task.d_output, bytes,
-                                cudaMemcpyDeviceToHost);
-                cudaDeviceSynchronize();   // 同步基线：每个任务都等 GPU 算完
+                cudaMemcpyAsync(task.h_output, task.d_output, bytes, cudaMemcpyDeviceToHost);
+                cudaDeviceSynchronize(); // 同步基线：每个任务都等 GPU 算完
                 processed++;
             } else {
                 if (!producer_done.load()) {
@@ -121,7 +120,7 @@ int main() {
     // 等待所有 GPU 工作（核函数和异步拷贝）完成
     cudaDeviceSynchronize();
 
-    //计时结束
+    // 计时结束
     auto end = std::chrono::high_resolution_clock::now();
     double ms = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() / 1000.0;
 
@@ -132,12 +131,13 @@ int main() {
         for (int i = 0; i < LENGTH; ++i) {
             if (fabs(host_results[task_id][i] - expected) > 1e-5) {
                 success = false;
-                printf("Mismatch at task %d, index %d: got %f, expected %f\n",
-                       task_id, i, host_results[task_id][i], expected);
+                printf("Mismatch at task %d, index %d: got %f, expected %f\n", task_id, i,
+                       host_results[task_id][i], expected);
                 break;
             }
         }
-        if (!success) break;
+        if (!success)
+            break;
     }
 
     printf("V1 Sync baseline: %s\n", success ? "PASS" : "FAIL");
@@ -145,7 +145,7 @@ int main() {
     printf("Throughput: %.2f tasks/s\n", NUM_TASKS * 1000.0 / ms);
 
     // 清理所有设备内存
-    for (float* ptr : device_ptrs) {
+    for (float *ptr : device_ptrs) {
         cudaFree(ptr);
     }
 

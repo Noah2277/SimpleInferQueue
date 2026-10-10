@@ -59,9 +59,47 @@ jobs:
         run: pip install clang-format==18.1.8
 
       - name: Check formatting
-        # 只扫描明确的源码目录，避免误扫到任何构建目录里的生成文件
+        # 只扫描明确的源码目录，避免误扫到任何构建目录里的生成文件。
+        # src/ 与 *.cu 曾经是盲区——把整个源码树都纳入是有意的：src/tensorrt_engine.cpp
+        # 当初就有 108 处违规却没人发现，只因为 find 没扫它
         run: |
-          find SimpleInferQueue/include SimpleInferQueue/examples \
-               SimpleInferQueue/tests SimpleInferQueue/benchmarks \
-               \( -name '*.h' -o -name '*.cpp' \) -print \
+          find SimpleInferQueue/include SimpleInferQueue/src \
+               SimpleInferQueue/examples SimpleInferQueue/tests \
+               SimpleInferQueue/benchmarks \
+               \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' \) -print \
             | xargs clang-format --dry-run --Werror
+
+  # 下游消费回归：把库 cmake --install 到临时 prefix，再用一个最小工程 find_package 回来。
+  #
+  # 这个 job 是为一个**活了很久的 bug** 补的：include(GNUInstallDirs) 写在 project() 之前，
+  # 导致 $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}> 在配置期展开成空串、导出目标的
+  # INTERFACE_INCLUDE_DIRECTORIES 被静默丢弃。库自己构建全绿，只有下游一 include 就炸。
+  # 换句话说：**没有这个 job，这类 bug 就只能靠人肉审查发现。**
+  # 只跑 Linux——问题是 CMake 层面的，三平台行为一致，没必要付三次矩阵成本
+  install-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install library to a temporary prefix
+        # 关掉测试/基准/CUDA：这一步只验证包导出，不需要拉 GoogleTest、Google Benchmark 和 CUDA
+        run: |
+          cmake -S SimpleInferQueue -B build-install \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/siq-prefix" \
+            -DSIMPLEINFERQUEUE_BUILD_TESTS=OFF \
+            -DSIMPLEINFERQUEUE_BUILD_BENCHMARKS=OFF \
+            -DSIMPLEINFERQUEUE_BUILD_CUDA_EXAMPLES=OFF
+          cmake --build build-install
+          cmake --install build-install
+
+      - name: Build a minimal downstream consumer
+        run: |
+          cmake -S SimpleInferQueue/tests/consumer -B build-consumer \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/siq-prefix"
+          cmake --build build-consumer
+
+      - name: Run the consumer
+        # 只编译通过还不够——真正跑一遍，确认链接和头文件都对得上
+        run: ./build-consumer/siq_consumer
